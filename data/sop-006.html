@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据平台 On-Call SOP</title>
+</head>
+<body>
+    <header>
+        <h1>数据平台 On-Call SOP</h1>
+        <p>文档编号：SOP-006 | 版本：v3.5 | 最后更新：2026-02-28</p>
+        <p>适用范围：数据平台团队全体值班人员，覆盖数据仓库、实时计算、数据治理</p>
+    </header>
+
+    <main>
+        <h2>一、值班职责</h2>
+        <p>数据平台值班工程师负责保障公司数据基础设施的稳定运行，确保数据的准确性、时效性和可用性。值班范围包括Hadoop/Spark集群、Flink实时计算平台、Hive数据仓库、Kafka数据通道、以及各类ETL调度任务。值班人员需每日早晨八点检查前一晚的离线任务执行情况，确认核心报表数据是否按时产出。值班周期为每周轮换，交接时需确认正在执行的数据迁移任务、积压的数据质量问题工单、以及集群资源使用趋势。值班人员需具备大数据组件运维能力，能独立处理Yarn资源调度、HDFS存储、Spark任务优化等常见问题。</p>
+
+        <h2>二、监控指标</h2>
+        <p>数据平台监控体系分为集群层和任务层两个维度。集群层监控包括：HDFS存储使用率和数据节点健康状态，使用率超过百分之七十五需要扩容或清理；YARN集群资源利用率，包括CPU核数和内存使用占比；Flink集群的TaskManager存活数和Checkpoint成功率；Kafka集群的Broker存活数、磁盘使用率和ISR状态。任务层监控包括：离线ETL任务的准时完成率，核心任务延迟超过三十分钟触发告警；实时任务的消费延迟，Flink任务的反压状态；数据质量指标，包括空值率、唯一性校验、数据量波动。所有监控通过自研的数据运维平台统一管理，支持任务级别的依赖链路可视化。</p>
+
+        <h2>三、常见故障处理</h2>
+
+        <h3>场景一：离线任务大面积失败</h3>
+        <p>调度系统显示大量离线任务失败时，首先检查是否是Hadoop集群层面的问题。查看YARN ResourceManager的Web UI确认集群状态，检查是否有大量Container启动失败。常见原因包括：HDFS NameNode进入安全模式导致无法写入、YARN资源不足导致任务长时间等待、Hive Metastore服务不可用。如果是NameNode安全模式，需要检查HDFS的数据块副本数是否达标，确认后可手动离开安全模式。如果是资源不足，检查是否有异常任务占用大量资源，必要时Kill低优先级任务释放资源。失败任务需按优先级逐步重跑，核心报表任务优先。</p>
+
+        <h3>场景二：Flink实时任务异常</h3>
+        <p>Flink任务出现消费延迟持续增长或Checkpoint失败时，首先通过Flink Dashboard查看任务的运行状态和反压情况。如果是全链路反压，可能是下游Sink写入慢或数据倾斜导致某个SubTask处理不过来。通过查看各SubTask的处理速率定位瓶颈。Checkpoint失败通常与State过大有关，检查State的大小趋势和Checkpoint超时设置。对于数据倾斜问题，临时方案是增加并行度或调整Key的分布。如果任务完全失败需要重启，确认从最近的Checkpoint或Savepoint恢复，避免数据丢失或重复消费。重启后需验证数据一致性。</p>
+
+        <h3>场景三：HDFS存储异常</h3>
+        <p>HDFS告警显示存储使用率过高或数据节点异常时，首先检查NameNode的Active/Standby状态确认高可用切换是否正常。如果是存储空间不足，通过HDFS的fsck命令检查数据分布，使用balancer进行数据均衡。清理过期的临时文件、Spark/MapReduce的中间输出、以及已过期的Hive分区数据。对于DataNode异常下线，检查该节点的磁盘健康状态和网络连通性。HDFS在三个副本模式下可以容忍单节点故障，但需要尽快修复以恢复数据冗余度。大面积DataNode下线可能导致数据块副本不足，此时NameNode会自动触发副本复制，需监控复制进度和网络带宽。</p>
+
+        <h3>场景四：数据质量问题</h3>
+        <p>数据质量监控告警显示核心指标异常时，需要判断是数据源问题还是ETL处理问题。首先查看数据源的原始数据量和分布是否正常，再逐级检查ETL各环节的数据转换逻辑。常见的数据质量问题包括：上游系统数据格式变更导致解析失败、时区处理错误导致数据错位、JOIN条件不当导致数据膨胀或丢失、增量同步遗漏数据。发现数据问题后需评估影响范围，确认哪些下游报表和业务决策受到影响。数据修复需要生成补丁任务，从源头重新加工受影响的数据分区。修复后需与业务方确认数据正确性。</p>
+
+        <h3>场景五：Kafka集群故障</h3>
+        <p>Kafka集群出现Broker下线或Leader选举频繁时，首先确认ZooKeeper集群的健康状态，因为Kafka依赖ZooKeeper进行元数据管理。检查Kafka Controller日志了解Leader选举原因。如果是Broker磁盘故障导致下线，将该Broker上的Partition Leader迁移到其他Broker。如果是ISR列表缩小，检查Follower的同步延迟，可能是网络或磁盘IO瓶颈。对于数据通道类的核心Topic，确认Producer的acks设置和Partition分布是否合理。Kafka集群故障可能同时影响实时计算和离线同步，需要同步通知相关团队。</p>
+
+        <h2>四、升级流程</h2>
+        <p>数据平台值班遇到以下情况需升级：一、核心报表数据延迟超过两小时；二、数据丢失或数据错误已影响业务决策；三、Hadoop或Flink集群核心组件完全不可用；四、大规模数据安全事件。升级路径：值班数据工程师到数据平台负责人到数据VP。核心报表通常在每日早晨九点前供业务方使用，因此凌晨的任务故障需在六点前升级处理。</p>
+
+        <h2>五、禁止操作</h2>
+        <p>以下操作严格禁止：一、在生产Hadoop集群上执行format命令；二、未经确认直接删除HDFS上的数据目录；三、在业务高峰期重启Kafka Broker或Flink JobManager；四、手动修改Hive Metastore数据库中的元数据；五、在未通知下游的情况下修改数据表结构或字段含义；六、使用root权限直接操作ZooKeeper的znode数据；七、在生产集群上运行未经测试的大规模数据回刷任务。</p>
+
+        <h2>六、工具与命令参考</h2>
+        <p>数据平台运维工具：集群管理使用Ambari或Cloudera Manager。任务调度使用Apache DolphinScheduler，支持DAG可视化和任务依赖管理。数据质量使用Apache Griffin进行数据质量检测。Flink管理通过Flink Dashboard和自研的Flink运维平台。Kafka管理使用Kafka Manager和Confluent Control Center。HDFS管理使用NameNode Web UI和hdfs dfsadmin命令。数据探查使用Jupyter Notebook和Zeppelin。元数据管理使用Apache Atlas进行数据血缘追踪。</p>
+    </main>
+
+    <footer>
+        <p>本文档由数据平台团队维护，如有疑问请联系：data-oncall@company.com</p>
+    </footer>
+
+    <script>
+        // 末尾的脚本标签 - 不应被提取为正文
+        (function() {
+            var docId = "SOP-006";
+            var loadTime = new Date().toISOString();
+            
+            // 页面访问统计
+            function trackPageView() {
+                var data = {
+                    docId: docId,
+                    timestamp: loadTime,
+                    userAgent: navigator.userAgent,
+                    referrer: document.referrer
+                };
+                fetch("/api/analytics/pageview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(data)
+                }).catch(function(err) {
+                    console.error("Analytics error:", err);
+                });
+            }
+            
+            // 阅读时长统计
+            var startTime = Date.now();
+            window.addEventListener("beforeunload", function() {
+                var duration = Date.now() - startTime;
+                navigator.sendBeacon("/api/analytics/duration", JSON.stringify({
+                    docId: docId,
+                    duration: duration
+                }));
+            });
+            
+            trackPageView();
+            
+            // 文档版本检查
+            fetch("/api/docs/" + docId + "/version")
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (data.version !== "3.5") {
+                        var banner = document.createElement("div");
+                        banner.textContent = "此文档已有新版本，请刷新页面获取最新内容";
+                        banner.style.cssText = "background:yellow;padding:10px;text-align:center;";
+                        document.body.insertBefore(banner, document.body.firstChild);
+                    }
+                });
+        })();
+    </script>
+</body>
+</html>

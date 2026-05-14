@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网络与CDN On-Call SOP</title>
+</head>
+<body>
+    <header>
+        <h1>网络&amp;CDN On-Call SOP</h1>
+        <p>文档编号：SOP-010 &vert; 版本：v4.0 &vert; 最后更新：2026-03-12</p>
+        <p>适用范围：网络&amp;CDN团队全体值班人员&comma;覆盖骨干网络&amp;CDN加速&amp;DNS服务&amp;负载均衡</p>
+    </header>
+
+    <main>
+        <h2>一&period;值班职责</h2>
+        <p>网络&amp;CDN值班工程师负责保障公司全部网络基础设施和CDN加速服务的稳定运行&period;值班范围包括&colon;IDC机房网络&amp;云上VPC网络&amp;跨区域专线&amp;CDN加速节点&amp;DNS解析服务&amp;四层&amp;七层负载均衡&period;值班人员需二十四小时响应网络告警&comma;因为网络故障通常影响面最广&comma;几乎所有上层服务都依赖网络的正常运行&period;值班周期为每周轮换&comma;交接时需确认网络设备的健康状态&amp;CDN回源率趋势&amp;DNS解析成功率&amp;以及正在进行的网络变更计划&period;值班人员应持有CCNP或同等网络认证&comma;熟悉BGP&amp;OSPF等路由协议&comma;以及Nginx&amp;HAProxy等负载均衡软件的配置管理&period;</p>
+
+        <h2>二&period;监控指标</h2>
+        <p>网络&amp;CDN监控体系覆盖四大领域&period;网络基础设施&colon;核心交换机&amp;路由器的CPU&amp;内存使用率&comma;接口流量&amp;错误包&amp;丢包率&comma;BGP邻居状态&amp;路由表变化&period;丢包率超过千分之一触发告警&period;CDN服务&colon;CDN节点的命中率需维持在百分之九十五以上&comma;回源带宽不超过总带宽的百分之三十&comma;CDN节点的五百错误率不超过千分之一&period;DNS服务&colon;DNS解析成功率需在百分之九十九点九九以上&comma;解析延迟P95需控制在五十毫秒以内&comma;DNS查询QPS监控&period;负载均衡&colon;LB的连接数&amp;每秒新建连接数&amp;活跃连接数&amp;后端健康检查状态&period;所有网络设备通过SNMP&amp;NetFlow采集数据&comma;CDN监控通过CDN厂商API和自建探测节点采集&comma;统一在Grafana展示&period;</p>
+
+        <h2>三&period;常见故障处理</h2>
+
+        <h3>场景一&colon;CDN节点故障</h3>
+        <p>CDN监控告警显示某区域节点异常时&comma;首先通过CDN控制台确认故障节点的具体位置和影响范围&period;检查该节点的服务状态&amp;磁盘健康&amp;网络连通性&period;如果是单节点故障&comma;CDN系统通常会自动将流量调度到其他可用节点&comma;需确认流量切换是否成功&period;如果是区域性故障&comma;可能影响该区域的所有用户&comma;需要手动调整DNS调度策略&comma;将流量牵引到其他区域的节点&period;CDN缓存命中率突然下降时&comma;检查是否有大量缓存被刷新&amp;回源策略是否变更&amp;或者新上线的资源未做预热&period;对于视频&amp;直播类CDN&comma;还需关注首帧时间和卡顿率指标&period;</p>
+
+        <h3>场景二&colon;DNS解析异常</h3>
+        <p>DNS解析失败或解析结果错误时&comma;影响范围极广&comma;所有依赖域名访问的服务都会受影响&period;首先确认是权威DNS还是递归DNS的问题&period;如果是权威DNS（如Route53&amp;CloudFlare）故障&comma;检查DNS记录配置是否被误改&comma;确认DNSSEC签名是否有效&period;如果是递归DNS缓存了错误的记录&comma;需要等待TTL过期或请求上游运营商刷新缓存&period;DNS劫持是另一个常见问题&comma;通过多地域DNS探测确认解析结果的一致性&period;紧急方案&colon;使用HttpDNS绕过传统DNS解析&comma;或者在客户端和服务端配置IP直连的fallback机制&period;DNS变更操作需格外谨慎&comma;错误的DNS记录修改可能导致全站不可访问&period;</p>
+
+        <h3>场景三&colon;跨区域网络延迟</h3>
+        <p>跨区域服务访问延迟增大时&comma;首先通过网络探测工具（MTR&amp;Traceroute）确认延迟发生在哪一跳&period;如果是运营商骨干网络拥塞&comma;短期内无法解决&comma;需要调整流量调度策略&comma;将流量切换到延迟更低的线路&period;对于使用专线连接的IDC间通信&comma;检查专线的带宽利用率和误码率&period;如果专线故障&comma;切换到备用线路或VPN通道&period;跨云区域（如阿里云华北到AWS东南亚）的延迟问题&comma;需要评估是否启用云厂商的全球加速服务&period;长期优化方案包括&colon;部署就近接入节点&amp;优化数据同步策略减少跨区域调用&amp;使用边缘计算减少回源&period;</p>
+
+        <h3>场景四&colon;负载均衡器故障</h3>
+        <p>负载均衡器（LB）异常会导致其后端的所有服务不可访问&period;首先确认LB自身的健康状态&colon;如果是云LB（如ALB&amp;CLB）&comma;检查云厂商是否有公告&period;如果是自建LB（Nginx&amp;HAProxy）&comma;检查进程状态&amp;配置文件语法&amp;upstream健康检查结果&period;LB返回五百二错误通常意味着后端服务全部不可用&comma;需要检查后端实例的健康状态&period;LB连接数达到上限时&comma;需要紧急扩容或优化连接复用配置&period;对于四层LB的会话保持问题&comma;检查连接超时设置是否合理&period;LB配置变更导致故障时&comma;立即回滚到上一个配置版本&period;生产LB的配置变更必须通过灰度发布机制&comma;先在部分节点生效确认无误后再全量推送&period;</p>
+
+        <h3>场景五&colon;DDoS攻击导致带宽打满</h3>
+        <p>网络监控显示入方向流量异常暴涨时&comma;首先判断是否为DDoS攻击&period;通过流量分析工具查看流量来源IP分布&amp;协议分布&amp;包大小分布&period;确认攻击类型&colon;UDP Flood&amp;SYN Flood&amp;HTTP Flood&amp;DNS反射攻击等&period;第一步&colon;启用云厂商的DDoS防护服务&comma;将流量牵引到清洗中心&period;第二步&colon;在边界路由器或防火墙配置ACL规则过滤明显的攻击流量&period;第三步&colon;如果攻击流量超过接入带宽&comma;联系上游运营商在骨干网层面进行流量清洗&period;攻击期间需密切监控业务可用性&comma;确保防护策略不会误杀正常流量&period;记录攻击特征&amp;持续时间&amp;峰值流量等信息&comma;用于后续的防护策略优化和安全事件报告&period;</p>
+
+        <h2>四&period;升级流程</h2>
+        <p>网络&amp;CDN值班遇到以下情况需立即升级&colon;一&amp;核心机房网络完全中断&semi;二&amp;DNS全局解析故障&semi;三&amp;CDN大面积节点故障影响超过百分之三十的用户&semi;四&amp;大规模DDoS攻击超过防护带宽&period;升级路径&colon;值班网络工程师&rarr;网络团队负责人&rarr;基础架构VP&period;网络故障通常是P0级别&comma;因为几乎所有服务都依赖网络&comma;需在三分钟内升级&period;</p>
+
+        <h2>五&period;禁止操作</h2>
+        <p>以下操作严格禁止&colon;一&amp;在业务高峰期变更核心交换机或路由器配置&semi;二&amp;未经确认直接修改生产DNS记录&semi;三&amp;在未通知业务方的情况下刷新CDN全部缓存&semi;四&amp;手动修改BGP路由宣告而不通知上下游&semi;五&amp;在生产LB上直接测试新配置&semi;六&amp;关闭DDoS防护服务进行所谓的&quot;性能测试&quot;&semi;七&amp;使用未授权的网络扫描工具对生产网络进行扫描&period;</p>
+
+        <h2>六&period;工具与命令参考</h2>
+        <p>网络&amp;CDN运维工具集&colon;网络监控使用Zabbix&amp;LibreNMS采集设备指标&comma;NetFlow分析使用nTop&period;CDN管理使用各CDN厂商控制台&comma;多CDN调度使用自研DNS调度平台&period;DNS管理使用PowerDNS Admin和云厂商DNS控制台&period;网络探测使用MTR&amp;Traceroute&amp;SmokePing进行链路质量检测&period;负载均衡管理使用Nginx Plus Dashboard和HAProxy Stats&period;DDoS防护使用云厂商高防服务和自建清洗中心&period;网络拓扑可视化使用NetBox&period;配置备份使用Oxidized自动备份网络设备配置&period;抓包分析使用Wireshark和tcpdump&period;</p>
+    </main>
+
+    <footer>
+        <p>本文档由网络&amp;CDN团队维护&comma;如有疑问请联系&colon;network-oncall&commat;company&period;com</p>
+    </footer>
+</body>
+</html>

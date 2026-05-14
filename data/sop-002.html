@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>数据库DBA On-Call SOP</title>
+    <style>
+        /* 这些样式内容不应被当作正文提取 */
+        body { font-family: "Microsoft YaHei", sans-serif; line-height: 1.8; color: #333; }
+        .alert-critical { background-color: #ff4444; color: white; padding: 10px; border-radius: 4px; }
+        .alert-warning { background-color: #ffaa00; color: white; padding: 10px; border-radius: 4px; }
+        .metric-table { border-collapse: collapse; width: 100%; }
+        .metric-table td, .metric-table th { border: 1px solid #ddd; padding: 8px; }
+        h1 { color: #1a5276; border-bottom: 3px solid #2980b9; padding-bottom: 10px; }
+        h2 { color: #2c3e50; margin-top: 30px; }
+        h3 { color: #34495e; }
+        .code-block { background: #f4f4f4; padding: 10px; font-family: monospace; }
+        .forbidden { color: red; font-weight: bold; }
+        #dynamic-content { display: none; }
+        .sop-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>数据库DBA On-Call SOP</h1>
+        <p>文档编号：SOP-002 | 版本：v4.1 | 最后更新：2026-02-20</p>
+        <p>适用范围：DBA团队全体值班人员，涵盖MySQL、PostgreSQL、Redis、MongoDB</p>
+    </header>
+
+    <script>
+        // 这段脚本内容不应被当作正文提取
+        var sopVersion = "4.1";
+        var alertThresholds = {
+            cpu: 70,
+            memory: 80,
+            disk: 85,
+            connections: 90,
+            replicationLag: 10
+        };
+        function checkDatabaseHealth() {
+            var metrics = fetchMetrics("/api/db/health");
+            if (metrics.cpu > alertThresholds.cpu) {
+                sendAlert("CPU使用率超过阈值", "warning");
+            }
+            if (metrics.replicationLag > alertThresholds.replicationLag) {
+                sendAlert("主从复制延迟超过阈值", "critical");
+            }
+        }
+        function sendAlert(message, level) {
+            console.log("[" + level.toUpperCase() + "] " + message);
+            fetch("/api/alert", {
+                method: "POST",
+                body: JSON.stringify({ message: message, level: level })
+            });
+        }
+        setInterval(checkDatabaseHealth, 60000);
+    </script>
+
+    <main>
+        <h2>一、值班职责</h2>
+        <p>数据库DBA值班工程师负责保障全公司数据库集群的稳定运行。值班人员需要具备MySQL、PostgreSQL、Redis和MongoDB的运维能力，能够独立处理常见的数据库故障。值班周期采用每周轮换制，交接时需确认各数据库集群的健康状态、正在进行的维护任务以及待处理的慢查询优化工单。值班期间需每四小时巡检一次核心数据库集群，检查主从复制状态、磁盘空间增长趋势、连接数使用率等关键指标。DBA值班人员同时承担审批职责，所有线上DDL操作需经值班DBA审核后方可执行。</p>
+
+        <h2>二、监控指标</h2>
+        <p>数据库监控体系分为四个层级。第一层是实例级监控，包括CPU使用率、内存使用率、磁盘IO吞吐量和IOPS、网络流量。CPU持续超过百分之七十或磁盘IO利用率超过百分之八十时触发告警。第二层是数据库级监控，包括每秒查询数QPS、每秒事务数TPS、慢查询数量、锁等待时间、临时表使用情况。慢查询每分钟超过五十条时触发告警。第三层是复制监控，包括主从延迟秒数、复制线程状态、GTID差异。主从延迟超过十秒触发严重告警。第四层是存储监控，包括表空间增长率、索引碎片率、Binlog空间占用。磁盘可用空间低于百分之十五时必须立即处理。所有监控数据通过PMM平台统一管理。</p>
+
+        <h2>三、常见故障处理</h2>
+
+        <h3>场景一：主从复制中断</h3>
+        <p>发现主从复制中断时，首先通过SHOW SLAVE STATUS命令检查复制错误信息。常见原因包括：主库Binlog被清理导致从库找不到对应位点、DDL语句在从库执行失败、主键冲突。如果是Binlog缺失，需要使用备份重建从库。如果是个别SQL执行失败，评估是否可以跳过该事务继续复制，跳过前必须确认数据一致性影响。对于GTID模式的复制，使用SET GTID_NEXT跳过事务。修复后需使用pt-table-checksum工具验证主从数据一致性。修复过程中需持续关注主库负载，因为从库不可用时读流量可能全部回到主库。</p>
+
+        <h3>场景二：数据库连接数暴涨</h3>
+        <p>当数据库连接数接近上限时，先通过SHOW PROCESSLIST查看当前活跃连接的分布情况，按用户、主机、命令类型统计。如果是某个应用实例异常创建大量连接，通知该应用负责人并考虑临时Kill该来源的空闲连接。如果是全局性的连接增长，检查是否有扩容导致应用实例数增加但连接池未调整的情况。紧急情况下可临时增大max_connections参数，但需同步增大系统文件描述符限制。同时检查连接池配置，确认最小连接数、最大连接数、空闲超时等参数是否合理。长期方案是推动应用侧使用连接池中间件如ProxySQL。</p>
+
+        <h3>场景三：磁盘空间告急</h3>
+        <p>磁盘空间使用率超过百分之八十五时需要立即处理。首先确认空间占用来源：数据文件、Binlog、慢查询日志、临时文件。如果是Binlog占用过大，检查expire_logs_days设置，必要时手动执行PURGE BINARY LOGS清理过期Binlog。如果是某个表数据增长异常，检查是否有批量写入任务未按预期清理历史数据。临时释放空间的方式包括：清理已过期的Binlog、压缩或删除旧的慢查询日志、清理临时文件。对于InnoDB表，即使删除了大量数据，数据文件也不会自动缩小，需要执行OPTIMIZE TABLE或使用pt-online-schema-change重建表来回收空间。紧急情况下如果磁盘即将写满，需要立即停止所有非核心写入。</p>
+
+        <h3>场景四：大事务阻塞</h3>
+        <p>当检测到长时间运行的大事务导致锁等待链过长时，首先通过information_schema的innodb_trx表查看当前活跃事务的持续时间和锁信息。使用SHOW ENGINE INNODB STATUS查看锁等待关系图。如果大事务来自在线业务，需要与业务方沟通确认是否可以Kill该事务。Kill大事务时需注意回滚可能需要较长时间，期间该表可能仍然不可用。如果大事务来自数据迁移或ETL任务，建议改为分批执行。对于频繁出现的锁冲突，需要从应用层面优化事务粒度，缩短事务持有锁的时间。</p>
+
+        <h3>场景五：Redis内存溢出</h3>
+        <p>Redis实例内存使用达到maxmemory限制时，根据淘汰策略的不同表现也不同。如果配置了noeviction策略，写入操作会直接报错。首先通过Redis的INFO MEMORY命令和MEMORY DOCTOR命令了解内存使用详情。使用redis-cli的bigkeys和hotkeys扫描找出大Key和热Key。常见的内存问题包括：Hash类型的Key包含过多字段、List类型无限增长、过期时间设置不合理导致Key堆积。紧急情况下可临时调大maxmemory，但需确认物理内存充足。长期方案包括：清理无用Key、优化数据结构、拆分大Key、设置合理的过期时间。对于集群模式，还需关注各节点的内存均衡。</p>
+
+        <h2>四、升级流程</h2>
+        <p>DBA值班遇到以下情况需立即升级：一、主库故障需要进行主从切换；二、数据丢失或数据不一致；三、核心业务数据库完全不可用；四、存在数据安全风险如SQL注入攻击痕迹。升级路径为：值班DBA到DBA团队负责人到基础架构总监。主从切换操作必须由两名DBA共同确认后执行，切换前需通知所有关联业务方。数据恢复操作需在隔离环境中先行验证恢复方案的正确性。所有P0级数据库故障需在五分钟内升级。</p>
+
+        <h2>五、禁止操作</h2>
+        <p>以下操作在值班期间严格禁止：一、在业务高峰期执行ALTER TABLE等DDL操作；二、未经备份直接删除或修改生产数据；三、在主库上执行不带WHERE条件的UPDATE或DELETE语句；四、手动修改数据库的系统参数后不记录变更；五、直接在生产实例上执行全表扫描的查询；六、未经确认直接进行主从切换；七、使用root账号执行日常运维操作。所有线上操作必须先在预发布环境验证，且需记录完整的操作日志。</p>
+
+        <h2>六、工具与命令参考</h2>
+        <p>DBA日常运维工具集：数据库监控使用PMM平台，地址为内部监控门户。慢查询分析使用pt-query-digest工具解析慢查询日志。在线DDL使用pt-online-schema-change或gh-ost工具，避免锁表。数据校验使用pt-table-checksum和pt-table-sync。备份管理使用XtraBackup进行物理备份，mysqldump用于逻辑备份。Redis运维使用redis-cli和RedisInsight可视化工具。MongoDB运维使用mongosh和MongoDB Compass。所有操作需通过堡垒机登录，操作审计日志保留一百八十天。</p>
+    </main>
+
+    <script>
+        // 页面加载完成后的初始化脚本，不应被提取为正文
+        document.addEventListener("DOMContentLoaded", function() {
+            var tables = document.querySelectorAll(".metric-table");
+            tables.forEach(function(table) {
+                var rows = table.querySelectorAll("tr");
+                rows.forEach(function(row, index) {
+                    if (index % 2 === 0) {
+                        row.style.backgroundColor = "#f9f9f9";
+                    }
+                });
+            });
+        });
+        console.log("SOP-002 loaded, version: " + sopVersion);
+    </script>
+
+    <footer>
+        <p>本文档由DBA团队维护，如有疑问请联系：dba-oncall@company.com</p>
+    </footer>
+</body>
+</html>

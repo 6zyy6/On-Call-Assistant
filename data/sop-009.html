@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QA质量保障 On-Call SOP</title>
+    <style>
+        /* 全局样式 - 不应被提取为正文 */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+            line-height: 1.8;
+            color: #2c3e50;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #fafafa;
+        }
+        header { background: #2c3e50; color: white; padding: 30px; border-radius: 8px; margin-bottom: 30px; }
+        header h1 { font-size: 28px; margin-bottom: 10px; }
+        header p { opacity: 0.9; font-size: 14px; }
+        main { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h2 { color: #2c3e50; font-size: 22px; margin: 30px 0 15px; padding-bottom: 8px; border-bottom: 2px solid #3498db; }
+        h3 { color: #34495e; font-size: 18px; margin: 20px 0 10px; }
+        p { margin-bottom: 15px; text-align: justify; }
+        footer { margin-top: 30px; padding: 20px; text-align: center; color: #7f8c8d; font-size: 14px; }
+        .alert { padding: 15px; border-radius: 4px; margin: 10px 0; }
+        .alert-danger { background: #fee; border-left: 4px solid #e74c3c; }
+        .alert-warning { background: #fff3cd; border-left: 4px solid #f39c12; }
+        .alert-info { background: #d1ecf1; border-left: 4px solid #17a2b8; }
+        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background: #f8f9fa; font-weight: 600; }
+        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: "Fira Code", monospace; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; color: white; }
+        .badge-critical { background: #e74c3c; }
+        .badge-high { background: #e67e22; }
+        .badge-medium { background: #f1c40f; color: #333; }
+        .badge-low { background: #27ae60; }
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            main { padding: 20px; }
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .status-live { animation: pulse 2s infinite; color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>QA质量保障 On-Call SOP</h1>
+        <p>文档编号：SOP-009 | 版本：v3.0 | 最后更新：2026-03-01</p>
+        <p>适用范围：QA质量保障团队全体值班人员，覆盖功能测试、性能测试、自动化测试平台</p>
+    </header>
+
+    <main>
+        <h2>一、值班职责</h2>
+        <p>QA质量保障值班工程师是产品质量的最后一道关卡，负责保障测试环境的可用性、自动化测试平台的稳定运行、以及线上质量问题的快速响应。值班人员需监控自动化回归测试的执行结果，确保每日持续集成流水线中的测试阶段正常运行。值班周期为每周轮换，交接时需确认测试环境的健康状态、正在执行的测试计划进度、以及待验证的线上问题列表。值班期间需每天检查各条业务线的自动化测试通过率、测试环境的服务可用性、以及性能测试集群的资源状态。QA值班人员还需配合开发团队处理线上质量事故的根因分析，确保问题复现和修复验证流程高效执行。</p>
+
+        <h2>二、监控指标</h2>
+        <p>QA质量保障监控体系包括三个层面。测试平台层面：自动化测试用例的执行通过率需维持在百分之九十五以上，失败用例需在二十四小时内分析原因并标记；持续集成流水线中测试阶段的平均执行时间，超过三十分钟需优化；测试数据工厂的可用性和数据生成成功率。测试环境层面：各业务线测试环境的服务可用率需在百分之九十九以上；测试环境与生产环境的配置一致性检查；测试数据库的容量和响应时间。线上质量层面：生产环境的Bug逃逸率（上线后发现的Bug数与总Bug数的比值），逃逸率超过百分之五需要复盘测试策略；各版本的缺陷密度趋势；用户反馈中质量相关问题的数量和响应时间。所有指标通过自研的质量大盘统一展示。</p>
+
+        <h2>三、常见故障处理</h2>
+
+        <h3>场景一：自动化测试大面积失败</h3>
+        <p>持续集成流水线中自动化测试大面积失败时，首先区分是测试环境问题还是被测服务问题。检查测试环境的基础设施状态：Selenium Grid的节点是否正常、测试数据库是否可用、Mock服务是否正常运行。如果是测试环境本身的问题，优先恢复环境再重新触发测试。如果是被测服务的接口变更导致测试用例失败，需要评估是接口设计问题还是测试用例需要更新。大面积测试失败会阻塞发布流水线，需要在一小时内给出初步结论。对于已知的环境不稳定导致的失败（Flaky Test），需要标记并从流水线的阻断条件中临时排除，同时安排修复。</p>
+
+        <h3>场景二：测试环境不可用</h3>
+        <p>测试环境服务全部或部分不可用时，会直接影响开发和测试团队的工作效率。首先通过环境管理平台确认各服务的部署状态和健康检查结果。常见原因包括：共享测试数据库被锁表导致全部服务超时、某个团队的部署操作影响了共享组件、测试环境的Kubernetes集群资源不足。如果是数据库问题，联系DBA值班协助处理。如果是资源不足，释放不活跃的Feature Branch环境。测试环境虽然不直接影响生产用户，但会严重影响研发效率，需在两小时内恢复。对于核心回归测试和预发布验证，需要有独立的稳定环境保障。</p>
+
+        <h3>场景三：性能测试环境异常</h3>
+        <p>性能测试集群出现异常时，可能影响正在进行的性能测试任务的准确性。检查JMeter或Gatling压测节点的资源使用率，确认压测工具本身是否成为瓶颈。检查被测环境的配置是否与生产一致，包括实例数、资源配额、数据库规格等。性能测试结果不准确的常见原因：压测节点网络带宽不足、被测环境存在资源竞争（多个团队同时压测）、测试数据量与生产差异过大。对于定期的性能基线测试，确保环境隔离和数据一致性。性能测试集群的维护窗口应避开各团队的压测排期。</p>
+
+        <h3>场景四：测试数据问题</h3>
+        <p>测试数据不可用或被污染时，会导致大量测试用例执行失败。测试数据问题包括：数据工厂生成数据失败、共享测试账号被其他测试用例修改、测试数据库数据被误删、敏感数据脱敏不完整。首先通过测试数据管理平台检查数据生成任务的执行日志。如果是数据工厂故障，检查上游依赖的服务（如用户注册接口、订单创建接口）是否正常。对于被污染的测试数据，执行数据重置脚本恢复到基线状态。长期方案是推动各测试用例使用独立的测试数据，避免共享数据带来的相互影响。敏感数据脱敏问题需立即上报安全团队。</p>
+
+        <h3>场景五：线上Bug紧急验证</h3>
+        <p>生产环境发现紧急Bug需要QA快速验证修复时，值班QA需配合开发团队完成验证流程。首先在测试环境复现Bug，确认复现路径和条件。开发提交修复代码后，在预发布环境进行修复验证，验证内容包括：Bug是否被修复、修复是否引入新问题（回归测试）、相关功能是否受影响。紧急Bug的验证应在修复代码提交后三十分钟内完成。验证通过后在工单中记录验证结果和测试范围，作为发布审批的依据。对于无法在测试环境复现的线上Bug，需协调获取生产日志和用户操作录像，在尽可能还原的条件下验证。</p>
+
+        <h2>四、升级流程</h2>
+        <p>QA值班遇到以下情况需升级：一、测试环境不可用超过四小时且影响多个团队；二、自动化测试平台完全瘫痪；三、发现已上线版本存在严重质量问题（数据错误、资金安全）；四、测试数据泄露涉及真实用户信息。升级路径：值班QA到QA团队负责人到质量VP。对于已上线的质量问题，需同时通知相关业务线的开发负责人。</p>
+
+        <h2>五、禁止操作</h2>
+        <p>以下操作严格禁止：一、在生产环境执行测试脚本或发送测试请求；二、使用真实用户数据作为测试数据而未经脱敏；三、在未确认修复效果的情况下签署发布审批；四、手动修改自动化测试的执行结果以通过流水线检查；五、删除测试环境的历史数据而不通知相关团队；六、在性能测试期间对被测环境进行配置变更；七、绕过代码审查流程直接合并测试代码到主分支。</p>
+
+        <h2>六、工具与命令参考</h2>
+        <p>QA运维工具集：自动化测试框架使用Selenium WebDriver和Appium（移动端），接口测试使用RestAssured和Postman。测试管理使用TestRail和自研质量平台。持续集成使用Jenkins和GitLab CI，测试阶段集成在发布流水线中。性能测试使用JMeter和Gatling，分布式压测使用自研压测平台。Mock服务使用WireMock和自研Mock平台。测试数据管理使用自研数据工厂。缺陷跟踪使用Jira。环境管理使用自研环境管理平台，支持一键创建和销毁Feature Branch环境。代码覆盖率使用JaCoCo和Istanbul。</p>
+    </main>
+
+    <footer>
+        <p>本文档由QA质量保障团队维护，如有疑问请联系：qa-oncall@company.com</p>
+    </footer>
+</body>
+</html>

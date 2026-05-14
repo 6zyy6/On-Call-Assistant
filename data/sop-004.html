@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang=zh-CN>
+<head>
+    <meta charset=UTF-8>
+    <meta name=viewport content=width=device-width, initial-scale=1.0>
+    <title>SRE基础设施 On-Call SOP</title>
+<body>
+    <header>
+        <h1>SRE基础设施 On-Call SOP</h1>
+        <p>文档编号：SOP-004 | 版本：v5.0 | 最后更新：2026-03-05
+        <p>适用范围：SRE团队全体值班人员，覆盖Kubernetes集群、云资源、CI/CD流水线
+    </header>
+
+    <main>
+        <h2>一、值班职责</h2>
+        <p>SRE基础设施值班工程师负责维护公司全部基础设施的可用性和可靠性。值班人员需熟练掌握Kubernetes集群管理、Terraform基础设施即代码、Ansible自动化运维等核心技能。值班周期为每周轮换，交接时需确认所有Kubernetes集群的健康状态、正在执行的基础设施变更以及各环境的资源利用率。值班期间需每两小时巡检一次核心基础设施，包括生产环境K8s集群节点状态、Etcd集群健康度、Ingress网关流量分布、以及各云厂商API的可用性。SRE值班人员还需审批所有生产环境的基础设施变更申请，确保变更经过充分评审。
+        <br>
+        <p>值班人员应具备跨云平台的运维能力，当前公司使用阿里云和AWS的混合云架构，需要熟悉两个平台的核心服务和故障排查方式。
+
+        <h2>二、监控指标
+        <p>SRE基础设施监控体系覆盖多个层级。容器平台层面：Kubernetes集群节点就绪率需保持百分之百，Pod重启次数异常增长需告警，集群CPU和内存请求率超过百分之七十五需扩容预警。计算资源层面：ECS和EC2实例的CPU、内存、磁盘使用率，自动伸缩组的实例数量变化。网络层面：VPC间网络延迟、负载均衡器的连接数和错误率、DNS解析成功率。存储层面：云盘IO延迟、对象存储的请求成功率、NAS文件系统的吞吐量。CI/CD层面：流水线执行成功率、构建时长趋势、部署频率。所有指标通过Prometheus联邦集群采集，使用Thanos实现跨集群长期存储和查询。
+
+        <h2>三、常见故障处理</h2>
+
+        <h3>场景一：Kubernetes节点NotReady
+        <p>发现节点变为NotReady状态时，首先通过kubectl describe node查看节点事件和状态条件，确认是kubelet进程异常、网络不通还是资源耗尽导致。如果是kubelet异常，SSH登录节点检查kubelet服务日志和systemd状态。如果是内存或磁盘压力导致，节点会进入MemoryPressure或DiskPressure状态，需要驱逐非核心Pod释放资源。对于频繁NotReady的节点，应先将其标记为不可调度（cordon），迁移上面的Pod到其他节点后再排查根因。如果是底层虚拟机问题，联系云厂商进行实例迁移。
+
+        <h3>场景二：Etcd集群异常</h3>
+        <p>Etcd是Kubernetes的核心组件，其故障会导致整个集群的API Server不可用。发现Etcd告警时需最高优先级处理。检查Etcd集群成员状态和Leader选举情况。常见问题包括：磁盘IO过慢导致心跳超时、数据库文件过大需要压缩、某个成员因网络分区落后太多。Etcd的磁盘IO延迟应控制在十毫秒以内，使用SSD存储是基本要求。如果需要恢复Etcd成员，务必按照官方文档的步骤操作，错误的恢复操作可能导致数据丢失。定期检查Etcd的自动备份是否正常运行。
+        <p>
+
+        <h3>场景三：Ingress网关过载
+        <p>当Ingress Controller（Nginx Ingress或Envoy）出现大量五百错误时，首先查看Ingress Pod的资源使用率。如果是CPU或内存不足，临时增加Ingress Controller的副本数和资源限制。检查是否有突发流量导致连接数暴涨，查看upstream的连接和响应时间分布。如果是后端服务响应慢导致Ingress连接堆积，需要配置合理的超时时间和重试策略。对于频繁出现的五百二错误（Bad Gateway），检查后端Service的Endpoint是否正常。对于五百三错误（Service Unavailable），确认后端Pod是否处于就绪状态。
+
+        <h3>场景四：CI/CD流水线大面积失败</h3>
+        <p>多个项目的CI/CD流水线同时失败时，首先排除基础设施层面的问题。检查Jenkins/GitLab Runner的Agent节点是否正常运行，构建节点的磁盘空间是否充足，Docker镜像仓库是否可访问。如果是依赖拉取失败，检查内部Maven仓库或npm Registry的可用性。如果是Docker构建失败，检查Docker Daemon状态和镜像拉取网络。流水线失败不影响已部署的生产服务，但会阻塞新功能上线和紧急修复的发布，因此需要尽快修复。
+
+        <h3>场景五：云资源配额不足
+        <p>当自动伸缩无法创建新实例或Kubernetes无法调度Pod时，可能是云资源配额耗尽。检查当前区域的实例配额、vCPU配额、EIP配额等。通过云厂商控制台或API查看配额使用情况。临时方案包括：释放闲置资源、在其他可用区创建实例、申请配额提升（通常需要数小时审批）。长期方案是建立配额监控和预警机制，在配额使用超过百分之八十时提前扩容或申请提升。
+
+        <h2>四、升级流程
+        <p>SRE值班遇到以下情况需立即升级：一、Kubernetes控制平面组件（API Server、Etcd、Controller Manager）不可用；二、多可用区同时故障；三、核心Ingress网关完全不可用；四、数据中心网络分区。升级路径：值班SRE到SRE团队负责人到基础架构VP。P0级基础设施故障需在三分钟内升级，因为基础设施故障通常影响所有上层服务。
+
+        <h2>五、禁止操作
+        <p>以下操作严格禁止：一、在生产集群直接执行kubectl delete node；二、未经审批修改生产环境的Terraform配置并apply；三、在高峰期进行Kubernetes版本升级；四、直接修改Etcd数据；五、删除生产环境的命名空间（namespace）；六、在未确认影响范围的情况下修改NetworkPolicy；七、关闭生产环境的监控告警。
+
+        <h2>六、工具与命令参考
+        <p>SRE常用工具：Kubernetes管理使用kubectl和k9s终端UI工具。基础设施编排使用Terraform和Pulumi。配置管理使用Ansible。监控使用Prometheus加Grafana加Thanos技术栈。日志使用ELK或Loki技术栈。告警使用AlertManager和PagerDuty。混沌工程使用ChaosMesh进行故障注入测试。集群诊断使用kubeadm和etcdctl。成本管理使用Kubecost分析资源使用效率。
+    </main>
+
+    <footer>
+        <p>本文档由SRE团队维护，如有疑问请联系：sre-oncall@company.com
+    </footer>
