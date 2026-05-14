@@ -1,4 +1,4 @@
-import math
+﻿import math
 import json
 import os
 import re
@@ -9,13 +9,13 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import RLock
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, Field
 import uvicorn
 
 
@@ -32,31 +32,27 @@ IGNORED_BLOCK_PATTERN = re.compile(
 )
 
 QUERY_EXPANSIONS = {
-    "服务器挂了": ["服务不可用", "服务宕机", "服务崩溃", "服务超时", "后端故障", "基础设施故障", "后端服务", "SRE基础设施", "Kubernetes", "Ingress"],
-    "挂了": ["不可用", "宕机", "崩溃", "中断", "超时"],
-    "宕机": ["不可用", "中断", "崩溃", "故障"],
-    "黑客攻击": ["安全攻击", "入侵", "SQL注入", "DDoS", "恶意流量", "安全事件", "信息安全", "WAF", "漏洞利用"],
-    "攻击": ["入侵", "DDoS", "注入", "恶意请求"],
-    "机器学习模型出问题": ["模型服务故障", "模型推理异常", "特征服务故障", "GPU故障", "效果下降", "AI算法", "推荐服务", "搜索服务"],
-    "模型出问题": ["模型服务故障", "推理异常", "特征异常", "GPU故障", "AI算法"],
-    "模型": ["推理", "特征服务", "效果", "GPU", "AI算法"],
+    "server down": ["service unavailable", "service outage", "service crash", "service timeout", "backend incident", "infrastructure incident", "kubernetes", "ingress"],
+    "outage": ["unavailable", "down", "interruption", "timeout"],
+    "attack": ["security incident", "intrusion", "sql injection", "ddos", "malicious traffic", "waf"],
+    "model issue": ["model serving incident", "inference failure", "feature service incident", "gpu incident", "quality drop", "recommendation service"],
 }
 
 DOMAIN_HINTS = {
-    "后端": ["后端", "服务", "接口", "网关", "依赖", "超时", "熔断"],
-    "sre": ["sre", "基础设施", "kubernetes", "k8s", "ingress", "etcd", "控制平面", "网关", "云资源"],
-    "数据库": ["数据库", "dba", "mysql", "redis", "postgresql", "主从", "连接池"],
-    "安全": ["安全", "攻击", "注入", "ddos", "漏洞", "风控", "恶意"],
-    "ai": ["ai", "算法", "模型", "推理", "特征", "gpu", "实验"],
-    "数据": ["数据", "hadoop", "flink", "kafka", "hdfs", "离线", "实时"],
+    "backend": ["backend", "service", "api", "gateway", "dependency", "timeout", "circuit breaker"],
+    "sre": ["sre", "infrastructure", "kubernetes", "k8s", "ingress", "etcd", "control plane", "gateway", "cloud"],
+    "database": ["database", "dba", "mysql", "redis", "postgresql", "replica", "connection pool"],
+    "security": ["security", "attack", "injection", "ddos", "vulnerability", "risk", "malicious"],
+    "ai": ["ai", "algorithm", "model", "inference", "feature", "gpu", "experiment"],
+    "data": ["data", "hadoop", "flink", "kafka", "hdfs", "offline", "realtime"],
 }
 
 QUERY_INTENTS = [
-    {"triggers": ["服务器", "服务", "挂了", "宕机", "不可用", "中断", "超时"], "domains": ["后端", "sre"]},
-    {"triggers": ["黑客", "攻击", "入侵", "注入", "ddos", "恶意"], "domains": ["安全"]},
-    {"triggers": ["模型", "机器学习", "推理", "特征", "gpu", "实验"], "domains": ["ai"]},
-    {"triggers": ["数据库", "主从", "连接池", "慢查询", "binlog"], "domains": ["数据库"]},
-    {"triggers": ["hadoop", "flink", "kafka", "hdfs", "离线任务", "实时计算"], "domains": ["数据"]},
+    {"triggers": ["server", "service", "down", "outage", "unavailable", "timeout"], "domains": ["backend", "sre"]},
+    {"triggers": ["attack", "intrusion", "injection", "ddos", "malicious"], "domains": ["security"]},
+    {"triggers": ["model", "ml", "inference", "feature", "gpu", "experiment"], "domains": ["ai"]},
+    {"triggers": ["database", "replica", "connection pool", "slow query", "binlog"], "domains": ["database"]},
+    {"triggers": ["hadoop", "flink", "kafka", "hdfs", "offline job", "realtime compute"], "domains": ["data"]},
 ]
 
 
@@ -189,7 +185,7 @@ def build_snippet(text: str, query: str, radius: int = 50) -> str:
 
 
 def expand_query(query: str) -> List[str]:
-    normalized = normalize_text(query)
+    normalized = normalize_text(query).lower()
     if not normalized:
         return []
 
@@ -199,19 +195,19 @@ def expand_query(query: str) -> List[str]:
     for phrase, related in QUERY_EXPANSIONS.items():
         if phrase in normalized:
             for item in related:
-                candidate = normalize_text(item)
+                candidate = normalize_text(item).lower()
                 if candidate and candidate not in seen:
                     seen.add(candidate)
                     expansions.append(candidate)
 
-    if any(token in normalized for token in ("服务器", "服务")):
-        for candidate in ("服务故障", "服务不可用", "后端服务", "基础设施"):
+    if any(token in normalized for token in ("server", "service")):
+        for candidate in ("service incident", "service unavailable", "backend service", "infrastructure"):
             if candidate not in seen:
                 seen.add(candidate)
                 expansions.append(candidate)
 
-    if "挂" in normalized or "宕机" in normalized:
-        for candidate in ("故障", "不可用", "中断", "超时"):
+    if any(token in normalized for token in ("down", "outage")):
+        for candidate in ("incident", "unavailable", "interruption", "timeout"):
             if candidate not in seen:
                 seen.add(candidate)
                 expansions.append(candidate)
@@ -703,11 +699,330 @@ class DocumentPayload(BaseModel):
     html: str
 
 
+class ChatHistoryItem(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatHistoryItem] = Field(default_factory=list)
+
+
+def encode_sse_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+class OnCallChatAgent:
+    def __init__(self) -> None:
+        self._lock = RLock()
+
+    def _tool_spec(self) -> List[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "readFile",
+                    "description": "Read one exact file from the data directory, such as sop-001.html.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "fname": {
+                                "type": "string",
+                                "description": "Exact file name under data/, for example sop-001.html",
+                            }
+                        },
+                        "required": ["fname"],
+                    },
+                },
+            }
+        ]
+
+    def _api_key(self) -> str:
+        api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("Missing DASHSCOPE_API_KEY. Set it before using /v3 chat.")
+        return api_key
+
+    def _base_url(self) -> str:
+        return os.getenv("DASHSCOPE_CHAT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+
+    def _model_name(self) -> str:
+        return os.getenv("DASHSCOPE_CHAT_MODEL", "qwen3.6-plus").strip() or "qwen3.6-plus"
+
+    def _available_files_text(self) -> str:
+        documents = store.list_documents()
+        if not documents:
+            return "No documents are loaded."
+        lines = [f"- {document.id}.html: {document.title}" for document in documents]
+        return "\n".join(lines)
+
+    def _system_prompt(self) -> str:
+        return (
+            "You are an On-Call assistant.\n"
+            "Answer only from SOP documents in data/.\n"
+            "Your only tool is readFile(fname), which reads one exact file.\n"
+            "Call readFile before relying on document details. Never claim to have read a file unless you actually called the tool.\n"
+            "Do not list directories, do not use wildcards, and do not read outside data/.\n"
+            "Prefer reading the 1-3 most relevant files, then answer with concise, actionable troubleshooting steps.\n"
+            "If the question is vague, choose the closest SOP, explain the assumption briefly, and keep moving.\n"
+            "When structure helps, use clean Markdown: headings, numbered steps, bullets, blockquotes, and `inline code`.\n"
+            "If the SOP does not support a claim, say that clearly instead of guessing.\n"
+            "Available files:\n"
+            f"{self._available_files_text()}"
+        )
+
+    def _chat_completion(self, messages: List[dict], tools: List[dict]) -> dict:
+        payload = {
+            "model": self._model_name(),
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+        }
+        request = Request(
+            f"{self._base_url()}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key()}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=90) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"DashScope chat request failed: HTTP {exc.code}. {details}".strip()) from exc
+        except URLError as exc:
+            raise RuntimeError(f"DashScope chat request failed: {exc.reason}") from exc
+
+    def _stream_chat_completion(self, messages: List[dict], tools: List[dict]) -> Iterator[dict]:
+        payload = {
+            "model": self._model_name(),
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+            "stream": True,
+        }
+        request = Request(
+            f"{self._base_url()}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key()}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=90) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    yield json.loads(data)
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"DashScope chat request failed: HTTP {exc.code}. {details}".strip()) from exc
+        except URLError as exc:
+            raise RuntimeError(f"DashScope chat request failed: {exc.reason}") from exc
+
+    def _read_file(self, fname: str) -> str:
+        normalized = fname.strip().replace("\\", "/")
+        if not normalized:
+            raise RuntimeError("fname is required")
+        if "*" in normalized or "?" in normalized:
+            raise RuntimeError("Wildcards are not allowed")
+        candidate = (DATA_DIR / normalized).resolve()
+        data_root = DATA_DIR.resolve()
+        if data_root not in candidate.parents or not candidate.is_file():
+            raise RuntimeError(f"File not found or access denied: {fname}")
+        return candidate.read_text(encoding="utf-8")
+
+    def _build_messages(self, history: List[ChatHistoryItem], message: str) -> List[dict]:
+        messages = [{"role": "system", "content": self._system_prompt()}]
+        for item in history:
+            role = item.role.strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            messages.append({"role": role, "content": item.content})
+        messages.append({"role": "user", "content": message})
+        return messages
+
+    def _execute_tool_call(self, tool_call: dict) -> tuple[str, List[dict], dict]:
+        function_payload = tool_call.get("function", {})
+        name = function_payload.get("name", "")
+        raw_arguments = function_payload.get("arguments", "{}")
+        try:
+            arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            arguments = {"fname": ""}
+
+        fname = str(arguments.get("fname", "")).strip()
+        events = [
+            {
+                "type": "tool_call",
+                "name": name,
+                "fname": fname,
+                "status": "started",
+                "message": f"正在读取 {fname}" if fname else "正在读取文件",
+            }
+        ]
+
+        if name != "readFile":
+            tool_output = f"Unsupported tool: {name}"
+            events.append(
+                {
+                    "type": "tool_call",
+                    "name": name,
+                    "fname": fname,
+                    "status": "failed",
+                    "message": f"读取 {fname or '文件'} 失败：不支持的工具",
+                }
+            )
+        else:
+            try:
+                tool_output = self._read_file(fname)
+                events.append(
+                    {
+                        "type": "tool_call",
+                        "name": name,
+                        "fname": fname,
+                        "status": "completed",
+                        "message": f"已读取 {fname}",
+                    }
+                )
+            except RuntimeError as exc:
+                tool_output = str(exc)
+                events.append(
+                    {
+                        "type": "tool_call",
+                        "name": name,
+                        "fname": fname,
+                        "status": "failed",
+                        "message": f"读取 {fname or '文件'} 失败：{exc}",
+                    }
+                )
+
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call.get("id", ""),
+            "content": tool_output,
+        }
+        return tool_output, events, tool_message
+
+    def chat(self, message: str, history: List[ChatHistoryItem]) -> dict:
+        tools = self._tool_spec()
+        messages = self._build_messages(history, message)
+        tool_calls_log: List[dict] = []
+
+        with self._lock:
+            for _ in range(4):
+                response_payload = self._chat_completion(messages, tools)
+                choices = response_payload.get("choices") or []
+                if not choices:
+                    raise RuntimeError("DashScope chat response did not include any choices.")
+                choice = choices[0]
+                assistant_message = choice.get("message", {})
+                tool_calls = assistant_message.get("tool_calls") or []
+                content = assistant_message.get("content") or ""
+
+                if tool_calls:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": tool_calls,
+                        }
+                    )
+                    for tool_call in tool_calls:
+                        _, events, tool_message = self._execute_tool_call(tool_call)
+                        tool_calls_log.extend(events)
+                        messages.append(tool_message)
+                    continue
+
+                return {
+                    "reply": content.strip() or "我暂时还没有整理出可靠结论。",
+                    "tool_calls": tool_calls_log,
+                }
+
+        raise RuntimeError("The agent did not finish within the tool-call limit.")
+
+    def stream_chat(self, message: str, history: List[ChatHistoryItem]) -> Iterator[str]:
+        tools = self._tool_spec()
+        messages = self._build_messages(history, message)
+
+        try:
+            with self._lock:
+                yield encode_sse_event({"type": "status", "message": "助手正在思考..."})
+                for _ in range(4):
+                    content_parts: List[str] = []
+                    pending_tool_calls: Dict[int, dict] = {}
+
+                    for chunk in self._stream_chat_completion(messages, tools):
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta", {})
+                        delta_content = delta.get("content")
+                        if delta_content:
+                            content_parts.append(delta_content)
+                            yield encode_sse_event({"type": "reply_delta", "delta": delta_content})
+
+                        for tool_call in delta.get("tool_calls") or []:
+                            index = int(tool_call.get("index", 0))
+                            entry = pending_tool_calls.setdefault(
+                                index,
+                                {
+                                    "id": tool_call.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                },
+                            )
+                            if tool_call.get("id"):
+                                entry["id"] = tool_call["id"]
+                            function_payload = tool_call.get("function", {})
+                            if function_payload.get("name"):
+                                entry["function"]["name"] = function_payload["name"]
+                            if function_payload.get("arguments"):
+                                entry["function"]["arguments"] += function_payload["arguments"]
+
+                    if pending_tool_calls:
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "".join(content_parts),
+                                "tool_calls": [pending_tool_calls[index] for index in sorted(pending_tool_calls)],
+                            }
+                        )
+                        for index in sorted(pending_tool_calls):
+                            _, events, tool_message = self._execute_tool_call(pending_tool_calls[index])
+                            for event in events:
+                                yield encode_sse_event(event)
+                            messages.append(tool_message)
+                        continue
+
+                    reply = "".join(content_parts).strip()
+                    yield encode_sse_event({"type": "done", "reply": reply})
+                    return
+
+            yield encode_sse_event({"type": "error", "message": "助手在工具调用轮次限制内未完成回答。"})
+        except RuntimeError as exc:
+            yield encode_sse_event({"type": "error", "message": str(exc)})
+
+
 DATA_DIR = Path(__file__).parent / "data"
 ENV_FILE = Path(__file__).parent / ".env"
 load_env_file(ENV_FILE)
 store = DocumentStore()
 semantic_engine = SemanticSearchEngine()
+chat_agent = OnCallChatAgent()
 
 def load_seed_documents() -> None:
     if not DATA_DIR.exists():
@@ -763,6 +1078,27 @@ def semantic_search_documents(q: str = Query(..., min_length=1)) -> dict:
     return {"query": q, "results": results}
 
 
+@app.post("/v3/chat")
+def chat_with_agent(payload: ChatRequest) -> dict:
+    try:
+        return chat_agent.chat(payload.message, payload.history)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/v3/chat/stream")
+def stream_chat_with_agent(payload: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        chat_agent.stream_chat(payload.message, payload.history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/v1", response_class=HTMLResponse)
 def search_page() -> str:
     return """
@@ -771,7 +1107,7 @@ def search_page() -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>On-Call 搜索</title>
+  <title>On-Call 鎼滅储</title>
   <style>
     :root {
       color-scheme: light;
@@ -836,12 +1172,12 @@ def search_page() -> str:
 </head>
 <body>
   <main>
-    <h1>On-Call SOP 搜索</h1>
+    <h1>On-Call SOP 鎼滅储</h1>
     <form id="search-form">
-      <input id="query" name="q" type="text" placeholder="输入关键词，例如 OOM / 故障 / CDN / &" autocomplete="off">
-      <button type="submit">搜索</button>
+      <input id="query" name="q" type="text" placeholder="杈撳叆鍏抽敭璇嶏紝渚嬪 OOM / 鏁呴殰 / CDN / &" autocomplete="off">
+      <button type="submit">鎼滅储</button>
     </form>
-    <div id="status" class="empty">请输入关键词开始搜索。</div>
+    <div id="status" class="empty">璇疯緭鍏ュ叧閿瘝寮€濮嬫悳绱€?/div>
     <ul id="results"></ul>
   </main>
   <script>
@@ -864,20 +1200,20 @@ def search_page() -> str:
       results.innerHTML = "";
 
       if (!query) {
-        status.textContent = "请输入关键词开始搜索。";
+        status.textContent = "璇疯緭鍏ュ叧閿瘝寮€濮嬫悳绱€?;
         return;
       }
 
-      status.textContent = "搜索中...";
+      status.textContent = "鎼滅储涓?..";
       const response = await fetch(`/v1/search?q=${encodeURIComponent(query)}`);
       const payload = await response.json();
 
       if (!payload.results.length) {
-        status.textContent = `没有找到与 "${query}" 相关的文档。`;
+        status.textContent = `娌℃湁鎵惧埌涓?"${query}" 鐩稿叧鐨勬枃妗ｃ€俙;
         return;
       }
 
-      status.textContent = `找到 ${payload.results.length} 条结果。`;
+      status.textContent = `鎵惧埌 ${payload.results.length} 鏉＄粨鏋溿€俙;
       results.innerHTML = payload.results.map((item) => `
         <li>
           <strong>${escapeHtml(item.title)}</strong>
@@ -900,7 +1236,7 @@ def semantic_search_page() -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>On-Call 语义搜索</title>
+  <title>On-Call 璇箟鎼滅储</title>
   <style>
     :root {
       color-scheme: light;
@@ -969,13 +1305,13 @@ def semantic_search_page() -> str:
 </head>
 <body>
   <main>
-    <h1>On-Call SOP 语义搜索</h1>
-    <p>支持不精确匹配的相似问题检索，例如“服务器挂了”或“黑客攻击”。</p>
+    <h1>On-Call SOP 璇箟鎼滅储</h1>
+    <p>鏀寔涓嶇簿纭尮閰嶇殑鐩镐技闂妫€绱紝渚嬪鈥滄湇鍔″櫒鎸備簡鈥濇垨鈥滈粦瀹㈡敾鍑烩€濄€?/p>
     <form id="search-form">
-      <input id="query" name="q" type="text" placeholder="输入语义查询，例如 服务器挂了 / 黑客攻击 / 机器学习模型出问题" autocomplete="off">
-      <button type="submit">搜索</button>
+      <input id="query" name="q" type="text" placeholder="杈撳叆璇箟鏌ヨ锛屼緥濡?鏈嶅姟鍣ㄦ寕浜?/ 榛戝鏀诲嚮 / 鏈哄櫒瀛︿範妯″瀷鍑洪棶棰? autocomplete="off">
+      <button type="submit">鎼滅储</button>
     </form>
-    <div id="status" class="empty">请输入一个问题或描述开始搜索。</div>
+    <div id="status" class="empty">璇疯緭鍏ヤ竴涓棶棰樻垨鎻忚堪寮€濮嬫悳绱€?/div>
     <ul id="results"></ul>
   </main>
   <script>
@@ -998,26 +1334,26 @@ def semantic_search_page() -> str:
       results.innerHTML = "";
 
       if (!query) {
-        status.textContent = "请输入一个问题或描述开始搜索。";
+        status.textContent = "璇疯緭鍏ヤ竴涓棶棰樻垨鎻忚堪寮€濮嬫悳绱€?;
         return;
       }
 
-      status.textContent = "搜索中...";
+      status.textContent = "鎼滅储涓?..";
 
       const response = await fetch(`/v2/search?q=${encodeURIComponent(query)}`);
       const payload = await response.json();
 
       if (!response.ok) {
-        status.textContent = payload.detail || "语义搜索暂时不可用。";
+        status.textContent = payload.detail || "璇箟鎼滅储鏆傛椂涓嶅彲鐢ㄣ€?;
         return;
       }
 
       if (!payload.results.length) {
-        status.textContent = `没有找到与 "${query}" 语义相关的文档。`;
+        status.textContent = `娌℃湁鎵惧埌涓?"${query}" 璇箟鐩稿叧鐨勬枃妗ｃ€俙;
         return;
       }
 
-      status.textContent = `找到 ${payload.results.length} 条结果。`;
+      status.textContent = `鎵惧埌 ${payload.results.length} 鏉＄粨鏋溿€俙;
       results.innerHTML = payload.results.map((item) => `
         <li>
           <strong>${escapeHtml(item.title)}</strong>
@@ -1032,10 +1368,509 @@ def semantic_search_page() -> str:
 """
 
 
+@app.get("/v3", response_class=HTMLResponse)
+def chat_page() -> str:
+    return r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>On-Call 助手</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f3f6fb;
+      color: #0f172a;
+    }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 24px 20px 28px;
+      display: grid;
+      gap: 16px;
+    }
+    .hero {
+      display: grid;
+      gap: 6px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+    .subtitle {
+      margin: 0;
+      color: #64748b;
+    }
+    .chat-shell {
+      display: grid;
+      gap: 14px;
+      min-height: 72vh;
+      background: #ffffff;
+      border: 1px solid #dbe4f0;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    #history {
+      min-height: 480px;
+      display: grid;
+      align-content: start;
+      gap: 12px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .empty {
+      color: #64748b;
+      padding: 8px 0;
+    }
+    .message {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px 14px;
+      background: #fff;
+    }
+    .message.user {
+      border-color: #bfdbfe;
+      background: #eff6ff;
+    }
+    .message.assistant {
+      border-color: #bbf7d0;
+      background: #f0fdf4;
+    }
+    .message.assistant.streaming {
+      box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.18);
+    }
+    .message.tool {
+      border-color: #dbe4f0;
+      background: #f8fafc;
+      color: #475569;
+      font-size: 14px;
+    }
+    .label {
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: #64748b;
+    }
+    .content {
+      line-height: 1.72;
+      word-break: break-word;
+    }
+    .content p {
+      margin: 0 0 10px;
+    }
+    .content p:last-child {
+      margin-bottom: 0;
+    }
+    .content h1, .content h2, .content h3 {
+      margin: 0 0 10px;
+      line-height: 1.4;
+    }
+    .content h1 { font-size: 22px; }
+    .content h2 { font-size: 18px; }
+    .content h3 { font-size: 16px; }
+    .content ul, .content ol {
+      margin: 0 0 10px 20px;
+      padding: 0;
+    }
+    .content li {
+      margin: 0 0 6px;
+    }
+    .content blockquote {
+      margin: 0 0 10px;
+      padding: 8px 12px;
+      border-left: 3px solid #94a3b8;
+      background: rgba(148, 163, 184, 0.08);
+      color: #334155;
+    }
+    .content hr {
+      border: 0;
+      border-top: 1px solid #cbd5e1;
+      margin: 12px 0;
+    }
+    .content pre {
+      margin: 10px 0;
+      padding: 12px;
+      border-radius: 6px;
+      background: #0f172a;
+      color: #e2e8f0;
+      overflow-x: auto;
+    }
+    .content code {
+      font-family: Consolas, monospace;
+      background: rgba(15, 23, 42, 0.08);
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+    .content pre code {
+      background: transparent;
+      padding: 0;
+    }
+    .content a {
+      color: #2563eb;
+    }
+    .composer {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: end;
+    }
+    .composer > div {
+      min-width: 0;
+    }
+    textarea, button {
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 15px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 104px;
+      max-height: 220px;
+      padding: 12px 14px;
+      resize: vertical;
+      font-family: inherit;
+      line-height: 1.5;
+    }
+    button {
+      min-width: 120px;
+      height: 46px;
+      padding: 0 18px;
+      background: #2563eb;
+      border-color: #2563eb;
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.7;
+      cursor: wait;
+    }
+    .hint {
+      font-size: 13px;
+      color: #64748b;
+    }
+    @media (max-width: 720px) {
+      .composer {
+        grid-template-columns: 1fr;
+      }
+      button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hero">
+      <h1>On-Call 助手</h1>
+      <p class="subtitle">通过自然语言提问，助手会按需读取 `data/` 下的 SOP，并实时展示工具调用过程与回复。</p>
+    </div>
+    <section class="chat-shell">
+      <div id="history">
+        <div class="empty">还没有对话。比如问：`Ingress 大量 502 应该先查什么？`</div>
+      </div>
+      <form id="chat-form" class="composer">
+        <div>
+          <textarea id="message" placeholder="输入 On-Call 问题，例如：支付接口大量超时，我先排查什么？"></textarea>
+          <div class="hint">Enter 发送，Shift+Enter 换行</div>
+        </div>
+        <button id="send" type="submit">发送</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const historyEl = document.getElementById("history");
+    const form = document.getElementById("chat-form");
+    const messageInput = document.getElementById("message");
+    const sendButton = document.getElementById("send");
+    const conversation = [];
+
+    function escapeHtml(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function removeEmptyState() {
+      const empty = historyEl.querySelector(".empty");
+      if (empty) empty.remove();
+    }
+
+    function renderEmptyState() {
+      if (historyEl.children.length === 0) {
+        historyEl.innerHTML = '<div class="empty">还没有对话。比如问：`Ingress 大量 502 应该先查什么？`</div>';
+      }
+    }
+
+    function normalizeMarkdownSource(source) {
+      return source.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n{3,}/g, "\n\n");
+    }
+
+    function renderInlineMarkdown(text) {
+      return escapeHtml(text)
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    }
+
+    function renderMarkdown(source) {
+      const normalized = normalizeMarkdownSource(source);
+      const lines = normalized.split("\n");
+      const blocks = [];
+      let inCode = false;
+      let codeLines = [];
+      let listType = "";
+      let listItems = [];
+      let quoteLines = [];
+
+      function flushList() {
+        if (!listItems.length) return;
+        const tag = listType === "ol" ? "ol" : "ul";
+        blocks.push(`<${tag}>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${tag}>`);
+        listType = "";
+        listItems = [];
+      }
+
+      function flushQuote() {
+        if (!quoteLines.length) return;
+        blocks.push(`<blockquote>${quoteLines.map((item) => `<p>${renderInlineMarkdown(item)}</p>`).join("")}</blockquote>`);
+        quoteLines = [];
+      }
+
+      function flushCode() {
+        if (!inCode) return;
+        blocks.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        inCode = false;
+        codeLines = [];
+      }
+
+      for (const rawLine of lines) {
+        const line = rawLine.trimEnd();
+        if (line.startsWith("```")) {
+          flushQuote();
+          flushList();
+          if (inCode) {
+            flushCode();
+          } else {
+            inCode = true;
+            codeLines = [];
+          }
+          continue;
+        }
+        if (inCode) {
+          codeLines.push(rawLine);
+          continue;
+        }
+
+        const trimmed = line.trim();
+        if (!trimmed) {
+          flushQuote();
+          flushList();
+          continue;
+        }
+
+        const orderedMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+        const bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
+        const quoteMatch = trimmed.match(/^>\s?(.*)$/);
+
+        if (quoteMatch) {
+          flushList();
+          quoteLines.push(quoteMatch[1]);
+          continue;
+        }
+
+        flushQuote();
+        if (orderedMatch) {
+          if (listType && listType !== "ol") flushList();
+          listType = "ol";
+          listItems.push(orderedMatch[1]);
+          continue;
+        }
+        if (bulletMatch) {
+          if (listType && listType !== "ul") flushList();
+          listType = "ul";
+          listItems.push(bulletMatch[1]);
+          continue;
+        }
+
+        flushList();
+        const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+          continue;
+        }
+        if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
+          blocks.push("<hr>");
+          continue;
+        }
+
+        blocks.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
+      }
+
+      flushQuote();
+      flushList();
+      flushCode();
+      return blocks.join("");
+    }
+
+    function addMessage(role, content, useMarkdown = false, beforeNode = null) {
+      removeEmptyState();
+      const item = document.createElement("div");
+      item.className = `message ${role}`;
+
+      const label = document.createElement("div");
+      label.className = "label";
+      label.textContent = role === "user" ? "用户" : role === "assistant" ? "助手" : "工具";
+
+      const body = document.createElement("div");
+      body.className = "content";
+      if (useMarkdown) {
+        body.innerHTML = renderMarkdown(content);
+      } else {
+        body.textContent = content;
+      }
+
+      item.append(label, body);
+      if (beforeNode && beforeNode.parentNode === historyEl) {
+        historyEl.insertBefore(item, beforeNode);
+      } else {
+        historyEl.appendChild(item);
+      }
+      historyEl.scrollTop = historyEl.scrollHeight;
+      return { item, body };
+    }
+
+    async function consumeEventStream(response, onEvent) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() || "";
+
+        for (const frame of frames) {
+          const dataLines = frame
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim());
+          for (const line of dataLines) {
+            if (line) onEvent(JSON.parse(line));
+          }
+        }
+      }
+    }
+
+    messageInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = messageInput.value.trim();
+      if (!message) return;
+
+      addMessage("user", message);
+      conversation.push({ role: "user", content: message });
+      messageInput.value = "";
+      sendButton.disabled = true;
+
+      const assistantMessage = addMessage("assistant", "正在思考...", true);
+      assistantMessage.item.classList.add("streaming");
+
+      let reply = "";
+      let paintQueued = false;
+
+      function paintReply(isFinal = false) {
+        paintQueued = false;
+        assistantMessage.body.innerHTML = renderMarkdown(reply || (isFinal ? "我暂时还没有整理出可靠结论。" : ""));
+        if (isFinal) assistantMessage.item.classList.remove("streaming");
+        historyEl.scrollTop = historyEl.scrollHeight;
+      }
+
+      function queuePaint() {
+        if (paintQueued) return;
+        paintQueued = true;
+        window.requestAnimationFrame(() => paintReply(false));
+      }
+
+      try {
+        const response = await fetch("/v3/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, history: conversation.slice(0, -1) }),
+        });
+
+        if (!response.ok || !response.body) {
+          assistantMessage.body.textContent = "请求失败。";
+          assistantMessage.item.classList.remove("streaming");
+          conversation.push({ role: "assistant", content: "请求失败。" });
+          return;
+        }
+
+        assistantMessage.body.innerHTML = "";
+        await consumeEventStream(response, (eventPayload) => {
+          if (eventPayload.type === "reply_delta") {
+            reply += eventPayload.delta || "";
+            queuePaint();
+            return;
+          }
+
+          if (eventPayload.type === "tool_call" || eventPayload.type === "status") {
+            addMessage("tool", eventPayload.message || "", false, assistantMessage.item);
+            return;
+          }
+
+          if (eventPayload.type === "error") {
+            reply = eventPayload.message || "请求失败。";
+            assistantMessage.body.innerHTML = renderMarkdown(reply);
+            assistantMessage.item.classList.remove("streaming");
+            return;
+          }
+
+          if (eventPayload.type === "done") {
+            reply = eventPayload.reply || reply;
+            paintReply(true);
+          }
+        });
+
+        conversation.push({ role: "assistant", content: reply || "我暂时还没有整理出可靠结论。" });
+      } catch (error) {
+        assistantMessage.body.textContent = "请求失败，请检查服务或网络配置。";
+        assistantMessage.item.classList.remove("streaming");
+        conversation.push({ role: "assistant", content: "请求失败，请检查服务或网络配置。" });
+      } finally {
+        sendButton.disabled = false;
+        messageInput.focus();
+        renderEmptyState();
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
 @app.get("/")
 def root() -> dict:
-    return {"message": "Visit /v1 for the search UI."}
+    return {"message": "Visit /v1 for keyword search, /v2 for semantic search, and /v3 for chat."}
 
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+
