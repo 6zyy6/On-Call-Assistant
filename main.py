@@ -845,6 +845,22 @@ def encode_sse_event(payload: dict) -> str:
 
 
 class OnCallChatAgent:
+    CROSS_TEAM_DOC_IDS = ("sop-001", "sop-002", "sop-004", "sop-005")
+    CROSS_TEAM_KEYWORDS = (
+        "p0",
+        "p1",
+        "故障响应",
+        "响应流程",
+        "升级流程",
+        "升级路径",
+        "故障分级",
+        "跨团队",
+        "应急响应",
+        "统一流程",
+        "on-call流程",
+        "值班流程",
+    )
+
     def __init__(self) -> None:
         self._lock = RLock()
         self._retrieval_cache: Dict[str, List[dict]] = {}
@@ -893,6 +909,89 @@ class OnCallChatAgent:
             del self._retrieval_cache[oldest_key]
         return [dict(item) for item in candidates]
 
+    def _document_by_id(self, doc_id: str) -> Optional[StoredDocument]:
+        for document in store.list_documents():
+            if document.id == doc_id:
+                return document
+        return None
+
+    def _is_cross_team_query(self, message: str, history: List[ChatHistoryItem]) -> bool:
+        text_parts = [message]
+        for item in history[-4:]:
+            if item.role.strip().lower() == "user":
+                text_parts.append(item.content)
+        normalized = normalize_text(" ".join(text_parts)).lower()
+        return any(keyword in normalized for keyword in self.CROSS_TEAM_KEYWORDS)
+
+    def _merge_candidate(self, merged: Dict[str, dict], result: dict, source: str) -> None:
+        existing = merged.get(result["id"])
+        score = float(result.get("score", 0.0))
+        payload = {
+            "id": result["id"],
+            "title": result["title"],
+            "snippet": result.get("snippet", ""),
+            "score": score,
+            "source": source,
+        }
+        if existing is None or score > existing["score"]:
+            merged[result["id"]] = payload
+
+    def _promote_cross_team_candidates(self, merged: Dict[str, dict], message: str) -> None:
+        query = normalize_text(message)
+        for doc_id in self.CROSS_TEAM_DOC_IDS:
+            if doc_id in merged:
+                merged[doc_id]["score"] += 0.75
+                continue
+            document = self._document_by_id(doc_id)
+            if not document:
+                continue
+            snippet = build_snippet(document.text, query) if query else ""
+            merged[doc_id] = {
+                "id": document.id,
+                "title": document.title,
+                "snippet": snippet,
+                "score": 0.75,
+                "source": "cross-team",
+            }
+
+    def _select_documents_to_read(self, candidates: List[dict], message: str, history: List[ChatHistoryItem]) -> List[dict]:
+        if not candidates:
+            fallback = [document for document in store.list_documents() if document.id.startswith("sop-")]
+            if not fallback:
+                return []
+            if self._is_cross_team_query(message, history):
+                preferred = [doc for doc in fallback if doc.id in self.CROSS_TEAM_DOC_IDS]
+                return [
+                    {"id": document.id, "title": document.title, "snippet": "", "score": 0.0, "source": "fallback"}
+                    for document in preferred[:3]
+                ]
+            document = fallback[0]
+            return [{"id": document.id, "title": document.title, "snippet": "", "score": 0.0, "source": "fallback"}]
+
+        if not self._is_cross_team_query(message, history):
+            return candidates[:1]
+
+        selected: List[dict] = []
+        seen_ids = set()
+
+        for doc_id in self.CROSS_TEAM_DOC_IDS:
+            candidate = next((item for item in candidates if item["id"] == doc_id), None)
+            if candidate and candidate["id"] not in seen_ids:
+                selected.append(candidate)
+                seen_ids.add(candidate["id"])
+            if len(selected) >= 3:
+                break
+
+        for candidate in candidates:
+            if candidate["id"] in seen_ids:
+                continue
+            selected.append(candidate)
+            seen_ids.add(candidate["id"])
+            if len(selected) >= 3:
+                break
+
+        return selected[:3]
+
     def _rag_candidates(self, message: str, history: List[ChatHistoryItem], limit: int = 4) -> List[dict]:
         query_parts: List[str] = []
         for item in history[-4:]:
@@ -911,13 +1010,7 @@ class OnCallChatAgent:
         merged: Dict[str, dict] = {}
         keyword_results = store.search(query, limit=limit)
         for result in keyword_results:
-            merged[result["id"]] = {
-                "id": result["id"],
-                "title": result["title"],
-                "snippet": result.get("snippet", ""),
-                "score": float(result.get("score", 0.0)),
-                "source": "keyword",
-            }
+            self._merge_candidate(merged, result, "keyword")
 
         should_run_semantic = True
         if keyword_results:
@@ -928,18 +1021,12 @@ class OnCallChatAgent:
         if should_run_semantic:
             try:
                 for result in semantic_engine.search(query, limit=limit):
-                    existing = merged.get(result["id"])
-                    score = float(result.get("score", 0.0))
-                    if existing is None or score > existing["score"]:
-                        merged[result["id"]] = {
-                            "id": result["id"],
-                            "title": result["title"],
-                            "snippet": result.get("snippet", ""),
-                            "score": score,
-                            "source": "semantic",
-                        }
+                    self._merge_candidate(merged, result, "semantic")
             except RuntimeError:
                 pass
+
+        if self._is_cross_team_query(message, history):
+            self._promote_cross_team_candidates(merged, message)
 
         candidates = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
         if candidates:
@@ -972,7 +1059,7 @@ class OnCallChatAgent:
         return "\n".join(lines)
 
     def _system_prompt(self, candidates: List[dict]) -> str:
-        return (
+        prompt = (
             "You are an On-Call assistant.\n"
             "Answer only from SOP documents in data/.\n"
             "Your only tool is readFile(fname), which reads one exact file.\n"
@@ -986,6 +1073,13 @@ class OnCallChatAgent:
             "Retrieved candidate files:\n"
             f"{self._candidate_files_text(candidates)}"
         )
+        candidate_ids = {candidate["id"] for candidate in candidates}
+        if candidate_ids.intersection(self.CROSS_TEAM_DOC_IDS):
+            prompt += (
+                "\nIf the user asks for a company-wide incident flow, P0/P1 response, escalation flow, or cross-team process, "
+                "you must read multiple SOPs before answering and synthesize a unified response."
+            )
+        return prompt
 
     def _chat_completion(self, messages: List[dict], tools: List[dict]) -> dict:
         payload = {
@@ -1143,12 +1237,7 @@ class OnCallChatAgent:
 
     def _read_documents_for_offline_answer(self, message: str, history: List[ChatHistoryItem]) -> tuple[List[dict], List[dict]]:
         candidates = self._rag_candidates(message, history)
-        normalized_message = normalize_text(message).lower()
-        read_limit = 3 if any(term in normalized_message for term in ["p0", "流程", "升级", "响应", "综合"]) else 1
-        selected = candidates[:read_limit] or [
-            {"id": document.id, "title": document.title, "snippet": "", "score": 0.0, "source": "fallback"}
-            for document in store.list_documents()[:1]
-        ]
+        selected = self._select_documents_to_read(candidates, message, history)
 
         tool_logs: List[dict] = []
         loaded_documents: List[dict] = []
@@ -1235,6 +1324,18 @@ class OnCallChatAgent:
                 sections.append("2. 再根据 SOP 中对应场景执行排查与止损。")
         else:
             sections.append("## 综合处理建议\n")
+            sections.append("已综合参考以下 SOP：")
+            for document in documents:
+                sections.append(f"- `{document['id']}.html`：{document['title']}")
+            sections.append("")
+            if self._is_cross_team_query(message, []):
+                sections.append("### 建议的统一流程")
+                sections.append("1. 先确认故障级别、影响范围、持续时间，以及是否命中核心业务链路。")
+                sections.append("2. 立即拉起对应值班群，同步当前现象、已知影响、最近变更和下一次更新时间。")
+                sections.append("3. 按团队分工并行排查：应用与依赖、数据库、基础设施、安全风险。")
+                sections.append("4. 若已达到 P0/P1 标准，立即按各团队 SOP 的升级路径升级到负责人。")
+                sections.append("5. 在止血后持续更新状态，确认恢复标准、回滚方案和后续复盘责任人。")
+                sections.append("")
             for document in documents:
                 guidance = self._rank_chunk_texts(message, document["id"], document["title"], document["html"], limit=2)
                 sections.append(f"### `{document['id']}.html` - {document['title']}")
