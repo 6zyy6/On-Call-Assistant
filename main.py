@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -36,23 +36,34 @@ QUERY_EXPANSIONS = {
     "outage": ["unavailable", "down", "interruption", "timeout"],
     "attack": ["security incident", "intrusion", "sql injection", "ddos", "malicious traffic", "waf"],
     "model issue": ["model serving incident", "inference failure", "feature service incident", "gpu incident", "quality drop", "recommendation service"],
+    "服务器挂了": ["服务不可用", "服务超时", "服务宕机", "后端故障", "基础设施故障", "kubernetes", "ingress"],
+    "挂了": ["不可用", "宕机", "中断", "超时"],
+    "黑客攻击": ["安全事件", "入侵", "ddos", "sql注入", "漏洞利用", "恶意流量"],
+    "攻击": ["入侵", "恶意流量", "ddos", "注入"],
+    "机器学习模型出问题": ["模型推理异常", "模型服务故障", "推荐质量下降", "gpu故障", "特征服务异常"],
+    "模型出问题": ["模型服务故障", "推理异常", "推荐质量下降", "gpu故障"],
+    "oom": ["outofmemoryerror", "memory leak", "pod restart", "内存泄漏", "内存溢出"],
 }
 
 DOMAIN_HINTS = {
-    "backend": ["backend", "service", "api", "gateway", "dependency", "timeout", "circuit breaker"],
-    "sre": ["sre", "infrastructure", "kubernetes", "k8s", "ingress", "etcd", "control plane", "gateway", "cloud"],
-    "database": ["database", "dba", "mysql", "redis", "postgresql", "replica", "connection pool"],
-    "security": ["security", "attack", "injection", "ddos", "vulnerability", "risk", "malicious"],
-    "ai": ["ai", "algorithm", "model", "inference", "feature", "gpu", "experiment"],
-    "data": ["data", "hadoop", "flink", "kafka", "hdfs", "offline", "realtime"],
+    "backend": ["backend", "service", "api", "gateway", "dependency", "timeout", "circuit breaker", "后端", "服务", "接口", "超时", "降级", "熔断", "pod", "oom", "内存"],
+    "sre": ["sre", "infrastructure", "kubernetes", "k8s", "ingress", "etcd", "control plane", "gateway", "cloud", "基础设施", "集群", "监控", "告警", "容量", "节点"],
+    "database": ["database", "dba", "mysql", "redis", "postgresql", "replica", "connection pool", "数据库", "主从", "延迟", "慢查询", "连接池", "binlog"],
+    "security": ["security", "attack", "injection", "ddos", "vulnerability", "risk", "malicious", "安全", "攻击", "入侵", "漏洞", "恶意", "waf"],
+    "ai": ["ai", "algorithm", "model", "inference", "feature", "gpu", "experiment", "算法", "模型", "推理", "特征", "推荐", "质量下降", "gpu"],
+    "data": ["data", "hadoop", "flink", "kafka", "hdfs", "offline", "realtime", "数据", "离线", "实时", "任务", "spark", "etl"],
+    "frontend": ["frontend", "web", "cdn", "页面", "白屏", "资源加载", "兼容性", "前端"],
+    "mobile": ["mobile", "app", "crash", "push", "热修复", "移动端", "崩溃率", "推送"],
 }
 
 QUERY_INTENTS = [
-    {"triggers": ["server", "service", "down", "outage", "unavailable", "timeout"], "domains": ["backend", "sre"]},
-    {"triggers": ["attack", "intrusion", "injection", "ddos", "malicious"], "domains": ["security"]},
-    {"triggers": ["model", "ml", "inference", "feature", "gpu", "experiment"], "domains": ["ai"]},
-    {"triggers": ["database", "replica", "connection pool", "slow query", "binlog"], "domains": ["database"]},
-    {"triggers": ["hadoop", "flink", "kafka", "hdfs", "offline job", "realtime compute"], "domains": ["data"]},
+    {"triggers": ["server", "service", "down", "outage", "unavailable", "timeout", "服务器", "服务", "挂了", "宕机", "不可用"], "domains": ["backend", "sre"]},
+    {"triggers": ["attack", "intrusion", "injection", "ddos", "malicious", "黑客", "攻击", "入侵", "漏洞", "恶意"], "domains": ["security"]},
+    {"triggers": ["model", "ml", "inference", "feature", "gpu", "experiment", "机器学习", "模型", "推理", "特征", "推荐"], "domains": ["ai"]},
+    {"triggers": ["database", "replica", "connection pool", "slow query", "binlog", "数据库", "主从", "延迟", "慢查询", "连接池"], "domains": ["database"]},
+    {"triggers": ["hadoop", "flink", "kafka", "hdfs", "offline job", "realtime compute", "数据", "etl", "spark"], "domains": ["data"]},
+    {"triggers": ["oom", "outofmemoryerror", "内存泄漏", "内存溢出"], "domains": ["backend", "sre"]},
+    {"triggers": ["cdn", "白屏", "资源加载"], "domains": ["frontend"]},
 ]
 
 
@@ -220,12 +231,22 @@ def build_hybrid_query(query: str) -> str:
     return " ".join(part for part in parts if part)
 
 
+def query_contains_trigger(combined_query: str, combined_tokens: List[str], trigger: str) -> bool:
+    normalized_trigger = normalize_text(trigger).lower()
+    if not normalized_trigger:
+        return False
+    if " " in normalized_trigger:
+        return normalized_trigger in combined_query
+    return normalized_trigger in combined_tokens
+
+
 @dataclass
 class StoredDocument:
     id: str
     title: str
     html: str
     text: str
+    heading_text: str
     tokens: List[str]
     term_freq: Counter
     length: int
@@ -309,6 +330,16 @@ def extract_document_chunks(html: str, title: str, doc_id: str) -> List[StoredCh
     ]
 
 
+def extract_heading_text(html: str, title: str) -> str:
+    cleaned_html = IGNORED_BLOCK_PATTERN.sub(" ", html)
+    headings = [title]
+    for match in re.finditer(r"<(h[1-3])[^>]*>(.*?)</\1>", cleaned_html, re.IGNORECASE | re.DOTALL):
+        content = strip_tags(match.group(2))
+        if content:
+            headings.append(content)
+    return normalize_text(" ".join(headings))
+
+
 class DocumentStore:
     def __init__(self) -> None:
         self._documents: Dict[str, StoredDocument] = {}
@@ -330,6 +361,7 @@ class DocumentStore:
             title=title or doc_id,
             html=html,
             text=text,
+            heading_text=extract_heading_text(html, title or doc_id),
             tokens=tokens,
             term_freq=Counter(tokens),
             length=len(tokens),
@@ -361,6 +393,8 @@ class DocumentStore:
         if not query_tokens:
             return []
 
+        normalized_query = normalize_text(query).lower()
+
         with self._lock:
             documents = list(self._documents.values())
             doc_count = len(documents)
@@ -370,7 +404,12 @@ class DocumentStore:
             average_length = self._total_terms / doc_count if self._total_terms else 0.0
             results = []
             for document in documents:
+                if not self._contains_keyword(document, normalized_query):
+                    continue
                 score = self._bm25_score(document, query_tokens, doc_count, average_length)
+                if score <= 0:
+                    score = 0.01
+                score += self._document_metadata_boost(document, normalized_query, query_tokens)
                 if score <= 0:
                     continue
                 results.append(
@@ -409,6 +448,34 @@ class DocumentStore:
             doc_frequency = self._doc_freq.get(token, 0)
             idf = math.log(1 + (doc_count - doc_frequency + 0.5) / (doc_frequency + 0.5))
             score += idf * ((frequency * (k1 + 1)) / (frequency + denominator_base))
+
+        return score
+
+    def _contains_keyword(self, document: StoredDocument, normalized_query: str) -> bool:
+        if not normalized_query:
+            return False
+        haystacks = [document.title.lower(), document.heading_text.lower(), document.text.lower()]
+        return any(normalized_query in haystack for haystack in haystacks)
+
+    def _document_metadata_boost(self, document: StoredDocument, normalized_query: str, query_tokens: List[str]) -> float:
+        heading_text = document.heading_text.lower()
+        title_text = document.title.lower()
+        body_text = document.text.lower()
+        score = 0.0
+
+        if normalized_query and normalized_query in title_text:
+            score += 0.9
+        if normalized_query and normalized_query in heading_text:
+            score += 1.2
+        if normalized_query and normalized_query in body_text:
+            score += 0.35
+            score += 0.08 * body_text.count(normalized_query)
+
+        for token in query_tokens:
+            if token and token in heading_text:
+                score += 0.1
+            elif token and token in title_text:
+                score += 0.06
 
         return score
 
@@ -534,10 +601,10 @@ class SemanticSearchEngine:
             return []
 
         with self._lock:
-            if self._last_error and self._index is None:
-                raise RuntimeError(self._last_error)
-            if self._index is None or not self._chunks:
+            if not self._chunks:
                 return []
+            if self._index is None:
+                return self._offline_search(query, limit)
 
             expanded_terms = expand_query(query)
             hybrid_query = build_hybrid_query(query)
@@ -599,6 +666,57 @@ class SemanticSearchEngine:
                 item.pop("_raw_score", None)
             return results
 
+    def _offline_search(self, query: str, limit: int = 10) -> List[dict]:
+        expanded_terms = expand_query(query)
+        hybrid_query = build_hybrid_query(query)
+        bm25_scores = self._score_chunks_bm25(hybrid_query)
+        keyword_scores = self._score_heading_matches(query, expanded_terms)
+        intent_scores = self._score_intent_boosts(query, expanded_terms)
+        phrase_scores = self._score_phrase_matches(query, expanded_terms)
+
+        candidate_indices = {
+            index
+            for index, score in sorted(
+                enumerate(bm25_scores),
+                key=lambda item: item[1],
+                reverse=True,
+            )[: min(max(limit * 8, 16), len(self._chunks))]
+            if score > 0
+        }
+        candidate_indices.update(index for index, score in enumerate(keyword_scores) if score > 0)
+        candidate_indices.update(index for index, score in enumerate(intent_scores) if score > 0)
+        candidate_indices.update(index for index, score in enumerate(phrase_scores) if score > 0)
+
+        if not candidate_indices:
+            candidate_indices = set(range(min(len(self._chunks), max(limit * 4, 12))))
+
+        max_bm25 = max((bm25_scores[index] for index in candidate_indices), default=1.0)
+        doc_results: Dict[str, dict] = {}
+        for chunk_index in candidate_indices:
+            chunk = self._chunks[chunk_index]
+            normalized_bm25 = bm25_scores[chunk_index] / max_bm25 if max_bm25 > 0 else 0.0
+            final_score = (
+                0.45 * normalized_bm25
+                + 0.20 * keyword_scores[chunk_index]
+                + 0.20 * intent_scores[chunk_index]
+                + 0.15 * phrase_scores[chunk_index]
+            )
+            current = doc_results.get(chunk.doc_id)
+            candidate = {
+                "id": chunk.doc_id,
+                "title": chunk.doc_title,
+                "snippet": build_snippet(chunk.context_text, query),
+                "score": round(final_score, 6),
+                "_raw_score": final_score,
+            }
+            if current is None or candidate["_raw_score"] > current["_raw_score"]:
+                doc_results[chunk.doc_id] = candidate
+
+        results = sorted(doc_results.values(), key=lambda item: item["_raw_score"], reverse=True)[:limit]
+        for item in results:
+            item.pop("_raw_score", None)
+        return results
+
     def _score_chunks_bm25(self, query: str) -> List[float]:
         query_tokens = tokenize(query)
         if not query_tokens:
@@ -659,10 +777,11 @@ class SemanticSearchEngine:
         normalized_query = normalize_text(query).lower()
         normalized_expansions = [term.lower() for term in expanded_terms]
         combined_query = " ".join([normalized_query] + normalized_expansions)
+        combined_tokens = tokenize(combined_query)
         target_domains: List[str] = []
 
         for intent in QUERY_INTENTS:
-            if any(trigger.lower() in combined_query for trigger in intent["triggers"]):
+            if any(query_contains_trigger(combined_query, combined_tokens, trigger) for trigger in intent["triggers"]):
                 for domain in intent["domains"]:
                     if domain not in target_domains:
                         target_domains.append(domain)
@@ -693,6 +812,18 @@ class SemanticSearchEngine:
 
         return scores
 
+    def _score_phrase_matches(self, query: str, expanded_terms: List[str]) -> List[float]:
+        phrases = [normalize_text(query).lower()] + [term.lower() for term in expanded_terms]
+        scores: List[float] = []
+        for chunk in self._chunks:
+            haystack = chunk.context_text.lower()
+            score = 0.0
+            for phrase in phrases:
+                if phrase and phrase in haystack:
+                    score += 0.4
+            scores.append(min(score, 1.0))
+        return scores
+
 
 class DocumentPayload(BaseModel):
     id: str
@@ -716,6 +847,8 @@ def encode_sse_event(payload: dict) -> str:
 class OnCallChatAgent:
     def __init__(self) -> None:
         self._lock = RLock()
+        self._retrieval_cache: Dict[str, List[dict]] = {}
+        self._file_cache: Dict[str, tuple[int, str]] = {}
 
     def _tool_spec(self) -> List[dict]:
         return [
@@ -744,32 +877,114 @@ class OnCallChatAgent:
             raise RuntimeError("Missing DASHSCOPE_API_KEY. Set it before using /v3 chat.")
         return api_key
 
+    def _has_api_key(self) -> bool:
+        return bool(os.getenv("DASHSCOPE_API_KEY", "").strip())
+
     def _base_url(self) -> str:
         return os.getenv("DASHSCOPE_CHAT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
 
     def _model_name(self) -> str:
         return os.getenv("DASHSCOPE_CHAT_MODEL", "qwen3.6-plus").strip() or "qwen3.6-plus"
 
-    def _available_files_text(self) -> str:
-        documents = store.list_documents()
-        if not documents:
-            return "No documents are loaded."
-        lines = [f"- {document.id}.html: {document.title}" for document in documents]
+    def _cache_retrieval(self, key: str, candidates: List[dict]) -> List[dict]:
+        self._retrieval_cache[key] = [dict(item) for item in candidates]
+        if len(self._retrieval_cache) > 128:
+            oldest_key = next(iter(self._retrieval_cache))
+            del self._retrieval_cache[oldest_key]
+        return [dict(item) for item in candidates]
+
+    def _rag_candidates(self, message: str, history: List[ChatHistoryItem], limit: int = 4) -> List[dict]:
+        query_parts: List[str] = []
+        for item in history[-4:]:
+            if item.role.strip().lower() == "user":
+                query_parts.append(item.content)
+        query_parts.append(message)
+        query = normalize_text(" ".join(part for part in query_parts if part))
+        if not query:
+            return []
+
+        cache_key = f"{limit}:{query.lower()}"
+        cached = self._retrieval_cache.get(cache_key)
+        if cached is not None:
+            return [dict(item) for item in cached]
+
+        merged: Dict[str, dict] = {}
+        keyword_results = store.search(query, limit=limit)
+        for result in keyword_results:
+            merged[result["id"]] = {
+                "id": result["id"],
+                "title": result["title"],
+                "snippet": result.get("snippet", ""),
+                "score": float(result.get("score", 0.0)),
+                "source": "keyword",
+            }
+
+        should_run_semantic = True
+        if keyword_results:
+            top_keyword_score = float(keyword_results[0].get("score", 0.0))
+            if top_keyword_score >= 2.0 and len(keyword_results) >= min(3, limit):
+                should_run_semantic = False
+
+        if should_run_semantic:
+            try:
+                for result in semantic_engine.search(query, limit=limit):
+                    existing = merged.get(result["id"])
+                    score = float(result.get("score", 0.0))
+                    if existing is None or score > existing["score"]:
+                        merged[result["id"]] = {
+                            "id": result["id"],
+                            "title": result["title"],
+                            "snippet": result.get("snippet", ""),
+                            "score": score,
+                            "source": "semantic",
+                        }
+            except RuntimeError:
+                pass
+
+        candidates = sorted(merged.values(), key=lambda item: item["score"], reverse=True)
+        if candidates:
+            return self._cache_retrieval(cache_key, candidates[:limit])
+
+        fallback_candidates = [
+            {
+                "id": document.id,
+                "title": document.title,
+                "snippet": "",
+                "score": 0.0,
+                "source": "fallback",
+            }
+            for document in store.list_documents()[: min(limit, 4)]
+        ]
+        return self._cache_retrieval(cache_key, fallback_candidates)
+
+    def _candidate_files_text(self, candidates: List[dict]) -> str:
+        if not candidates:
+            return "No candidate files are available."
+
+        lines = []
+        for index, candidate in enumerate(candidates, start=1):
+            snippet = normalize_text(candidate.get("snippet", ""))
+            if len(snippet) > 120:
+                snippet = snippet[:117] + "..."
+            lines.append(f"{index}. {candidate['id']}.html - {candidate['title']}")
+            if snippet:
+                lines.append(f"   snippet: {snippet}")
         return "\n".join(lines)
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, candidates: List[dict]) -> str:
         return (
             "You are an On-Call assistant.\n"
             "Answer only from SOP documents in data/.\n"
             "Your only tool is readFile(fname), which reads one exact file.\n"
             "Call readFile before relying on document details. Never claim to have read a file unless you actually called the tool.\n"
             "Do not list directories, do not use wildcards, and do not read outside data/.\n"
+            "The system may provide retrieved candidate files. Prefer those candidates first when they match the user request.\n"
             "Prefer reading the 1-3 most relevant files, then answer with concise, actionable troubleshooting steps.\n"
             "If the question is vague, choose the closest SOP, explain the assumption briefly, and keep moving.\n"
             "When structure helps, use clean Markdown: headings, numbered steps, bullets, blockquotes, and `inline code`.\n"
             "If the SOP does not support a claim, say that clearly instead of guessing.\n"
-            "Available files:\n"
-            f"{self._available_files_text()}"
+            "Retrieved candidate files:\n"
+            f"{self._candidate_files_text(candidates)}"
         )
 
     def _chat_completion(self, messages: List[dict], tools: List[dict]) -> dict:
@@ -842,10 +1057,20 @@ class OnCallChatAgent:
         data_root = DATA_DIR.resolve()
         if data_root not in candidate.parents or not candidate.is_file():
             raise RuntimeError(f"File not found or access denied: {fname}")
-        return candidate.read_text(encoding="utf-8")
+        stat = candidate.stat()
+        cache_key = str(candidate)
+        cached = self._file_cache.get(cache_key)
+        if cached and cached[0] == stat.st_mtime_ns:
+            return cached[1]
+        content = candidate.read_text(encoding="utf-8")
+        self._file_cache[cache_key] = (stat.st_mtime_ns, content)
+        if len(self._file_cache) > 128:
+            oldest_key = next(iter(self._file_cache))
+            del self._file_cache[oldest_key]
+        return content
 
-    def _build_messages(self, history: List[ChatHistoryItem], message: str) -> List[dict]:
-        messages = [{"role": "system", "content": self._system_prompt()}]
+    def _build_messages(self, history: List[ChatHistoryItem], message: str, candidates: List[dict]) -> List[dict]:
+        messages = [{"role": "system", "content": self._system_prompt(candidates)}]
         for item in history:
             role = item.role.strip().lower()
             if role not in {"user", "assistant"}:
@@ -916,46 +1141,179 @@ class OnCallChatAgent:
         }
         return tool_output, events, tool_message
 
+    def _read_documents_for_offline_answer(self, message: str, history: List[ChatHistoryItem]) -> tuple[List[dict], List[dict]]:
+        candidates = self._rag_candidates(message, history)
+        normalized_message = normalize_text(message).lower()
+        read_limit = 3 if any(term in normalized_message for term in ["p0", "流程", "升级", "响应", "综合"]) else 1
+        selected = candidates[:read_limit] or [
+            {"id": document.id, "title": document.title, "snippet": "", "score": 0.0, "source": "fallback"}
+            for document in store.list_documents()[:1]
+        ]
+
+        tool_logs: List[dict] = []
+        loaded_documents: List[dict] = []
+        for index, candidate in enumerate(selected):
+            tool_call = {
+                "id": f"offline-read-{index}",
+                "type": "function",
+                "function": {
+                    "name": "readFile",
+                    "arguments": json.dumps({"fname": f"{candidate['id']}.html"}, ensure_ascii=False),
+                },
+            }
+            content, events, _ = self._execute_tool_call(tool_call)
+            tool_logs.extend(events)
+            loaded_documents.append(
+                {
+                    "id": candidate["id"],
+                    "title": candidate["title"],
+                    "html": content,
+                }
+            )
+        return loaded_documents, tool_logs
+
+    def _rank_chunk_texts(self, message: str, document_id: str, title: str, html: str, limit: int = 3) -> List[str]:
+        chunks = extract_document_chunks(html, title, document_id)
+        if not chunks:
+            return []
+
+        query = build_hybrid_query(message)
+        query_tokens = tokenize(query)
+        normalized_query = normalize_text(message).lower()
+        expanded_terms = [term.lower() for term in expand_query(message)]
+        ranked: List[tuple[float, str]] = []
+        for chunk in chunks:
+            heading_text = normalize_text(f"{chunk.doc_title} {chunk.heading}").lower()
+            body_text = chunk.context_text.lower()
+            token_overlap = sum(chunk.term_freq.get(token, 0) for token in query_tokens)
+            phrase_hits = sum(1 for phrase in [normalized_query] + expanded_terms if phrase and phrase in body_text)
+            heading_hits = sum(1 for token in query_tokens if token and token in heading_text)
+            score = (1.4 * token_overlap) + (1.2 * phrase_hits) + (0.8 * heading_hits)
+            ranked.append((score, chunk.text))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        seen = set()
+        results: List[str] = []
+        for _, text in ranked:
+            summary = self._shorten_guidance(text)
+            if not summary or summary in seen:
+                continue
+            seen.add(summary)
+            results.append(summary)
+            if len(results) >= limit:
+                break
+        return results
+
+    def _shorten_guidance(self, text: str, limit: int = 150) -> str:
+        normalized = normalize_text(text)
+        if len(normalized) <= limit:
+            return normalized
+
+        parts = [part.strip() for part in re.split(r"[。！？；]", normalized) if part.strip()]
+        snippet = ""
+        for part in parts:
+            candidate = f"{snippet}；{part}" if snippet else part
+            if len(candidate) > limit:
+                break
+            snippet = candidate
+        return snippet or (normalized[: limit - 3] + "...")
+
+    def _build_offline_reply(self, message: str, documents: List[dict]) -> str:
+        if not documents:
+            return "我暂时没有找到可参考的 SOP 文档。"
+
+        normalized_message = normalize_text(message).lower()
+        sections: List[str] = []
+        if len(documents) == 1:
+            document = documents[0]
+            sections.append(f"## 处理建议\n\n已参考 `{document['id']}.html`（{document['title']}）。")
+            guidance = self._rank_chunk_texts(message, document["id"], document["title"], document["html"])
+            if guidance:
+                sections.extend(f"{index}. {item}" for index, item in enumerate(guidance, start=1))
+            else:
+                sections.append("1. 先核对告警范围、影响面和最近变更。")
+                sections.append("2. 再根据 SOP 中对应场景执行排查与止损。")
+        else:
+            sections.append("## 综合处理建议\n")
+            for document in documents:
+                guidance = self._rank_chunk_texts(message, document["id"], document["title"], document["html"], limit=2)
+                sections.append(f"### `{document['id']}.html` - {document['title']}")
+                if guidance:
+                    sections.extend(f"- {item}" for item in guidance)
+
+        if any(term in normalized_message for term in ["p0", "升级", "响应流程", "响应"]):
+            sections.append("\n## 升级提醒\n")
+            sections.append("- 先确认影响范围、持续时间和是否命中核心链路。")
+            sections.append("- 若已达到 P0/P1 级别，立即按值班链路升级，并同步相关负责人。")
+
+        return "\n".join(sections).strip()
+
+    def _offline_chat(self, message: str, history: List[ChatHistoryItem]) -> dict:
+        documents, tool_logs = self._read_documents_for_offline_answer(message, history)
+        return {
+            "reply": self._build_offline_reply(message, documents),
+            "tool_calls": tool_logs,
+        }
+
+    def _offline_stream_chat(self, message: str, history: List[ChatHistoryItem]) -> Iterator[str]:
+        documents, tool_logs = self._read_documents_for_offline_answer(message, history)
+        for event in tool_logs:
+            yield encode_sse_event(event)
+        yield encode_sse_event({"type": "status", "message": "助手正在整理 SOP 结论..."})
+        reply = self._build_offline_reply(message, documents)
+        yield encode_sse_event({"type": "reply_delta", "delta": reply})
+        yield encode_sse_event({"type": "done", "reply": reply})
+
     def chat(self, message: str, history: List[ChatHistoryItem]) -> dict:
+        if not self._has_api_key():
+            return self._offline_chat(message, history)
         tools = self._tool_spec()
-        messages = self._build_messages(history, message)
+        candidates = self._rag_candidates(message, history)
+        messages = self._build_messages(history, message, candidates)
         tool_calls_log: List[dict] = []
 
         with self._lock:
-            for _ in range(4):
-                response_payload = self._chat_completion(messages, tools)
-                choices = response_payload.get("choices") or []
-                if not choices:
-                    raise RuntimeError("DashScope chat response did not include any choices.")
-                choice = choices[0]
-                assistant_message = choice.get("message", {})
-                tool_calls = assistant_message.get("tool_calls") or []
-                content = assistant_message.get("content") or ""
+            try:
+                for _ in range(4):
+                    response_payload = self._chat_completion(messages, tools)
+                    choices = response_payload.get("choices") or []
+                    if not choices:
+                        raise RuntimeError("DashScope chat response did not include any choices.")
+                    choice = choices[0]
+                    assistant_message = choice.get("message", {})
+                    tool_calls = assistant_message.get("tool_calls") or []
+                    content = assistant_message.get("content") or ""
 
-                if tool_calls:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": tool_calls,
-                        }
-                    )
-                    for tool_call in tool_calls:
-                        _, events, tool_message = self._execute_tool_call(tool_call)
-                        tool_calls_log.extend(events)
-                        messages.append(tool_message)
-                    continue
+                    if tool_calls:
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": content,
+                                "tool_calls": tool_calls,
+                            }
+                        )
+                        for tool_call in tool_calls:
+                            _, events, tool_message = self._execute_tool_call(tool_call)
+                            tool_calls_log.extend(events)
+                            messages.append(tool_message)
+                        continue
 
-                return {
-                    "reply": content.strip() or "我暂时还没有整理出可靠结论。",
-                    "tool_calls": tool_calls_log,
-                }
+                    return {
+                        "reply": content.strip() or "我暂时还没有整理出可靠结论。",
+                        "tool_calls": tool_calls_log,
+                    }
+            except RuntimeError:
+                return self._offline_chat(message, history)
 
         raise RuntimeError("The agent did not finish within the tool-call limit.")
 
     def stream_chat(self, message: str, history: List[ChatHistoryItem]) -> Iterator[str]:
+        if not self._has_api_key():
+            yield from self._offline_stream_chat(message, history)
+            return
         tools = self._tool_spec()
-        messages = self._build_messages(history, message)
+        candidates = self._rag_candidates(message, history)
+        messages = self._build_messages(history, message, candidates)
 
         try:
             with self._lock:
@@ -1014,7 +1372,10 @@ class OnCallChatAgent:
 
             yield encode_sse_event({"type": "error", "message": "助手在工具调用轮次限制内未完成回答。"})
         except RuntimeError as exc:
-            yield encode_sse_event({"type": "error", "message": str(exc)})
+            if self._has_api_key():
+                yield from self._offline_stream_chat(message, history)
+            else:
+                yield encode_sse_event({"type": "error", "message": str(exc)})
 
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -1056,12 +1417,18 @@ app = FastAPI(
 
 @app.post("/v1/documents")
 def upsert_document(payload: DocumentPayload) -> dict:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    target = (DATA_DIR / f"{payload.id}.html").resolve()
+    data_root = DATA_DIR.resolve()
+    if data_root not in target.parents:
+        raise HTTPException(status_code=400, detail="Document id is invalid")
+    target.write_text(payload.html, encoding="utf-8")
     document = store.upsert(payload.id, payload.html)
     try:
         semantic_engine.rebuild(store.list_documents())
     except RuntimeError as exc:
         print(f"Semantic index skipped after document update: {exc}")
-    return {"id": document.id, "title": document.title}
+    return JSONResponse(status_code=201, content={"id": document.id, "title": document.title})
 
 
 @app.get("/v1/search")
@@ -1107,7 +1474,7 @@ def search_page() -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>On-Call 鎼滅储</title>
+  <title>On-Call 关键词搜索</title>
   <style>
     :root {
       color-scheme: light;
@@ -1172,12 +1539,12 @@ def search_page() -> str:
 </head>
 <body>
   <main>
-    <h1>On-Call SOP 鎼滅储</h1>
+    <h1>On-Call SOP 关键词搜索</h1>
     <form id="search-form">
-      <input id="query" name="q" type="text" placeholder="杈撳叆鍏抽敭璇嶏紝渚嬪 OOM / 鏁呴殰 / CDN / &" autocomplete="off">
-      <button type="submit">鎼滅储</button>
+      <input id="query" name="q" type="text" placeholder="输入关键词，例如 OOM / 故障 / CDN / &" autocomplete="off">
+      <button type="submit">搜索</button>
     </form>
-    <div id="status" class="empty">璇疯緭鍏ュ叧閿瘝寮€濮嬫悳绱€?/div>
+    <div id="status" class="empty">请输入关键词开始搜索。</div>
     <ul id="results"></ul>
   </main>
   <script>
@@ -1200,20 +1567,20 @@ def search_page() -> str:
       results.innerHTML = "";
 
       if (!query) {
-        status.textContent = "璇疯緭鍏ュ叧閿瘝寮€濮嬫悳绱€?;
+        status.textContent = "请输入关键词开始搜索。";
         return;
       }
 
-      status.textContent = "鎼滅储涓?..";
+      status.textContent = "搜索中...";
       const response = await fetch(`/v1/search?q=${encodeURIComponent(query)}`);
       const payload = await response.json();
 
       if (!payload.results.length) {
-        status.textContent = `娌℃湁鎵惧埌涓?"${query}" 鐩稿叧鐨勬枃妗ｃ€俙;
+        status.textContent = `没有找到与 "${query}" 相关的文档。`;
         return;
       }
 
-      status.textContent = `鎵惧埌 ${payload.results.length} 鏉＄粨鏋溿€俙;
+      status.textContent = `找到 ${payload.results.length} 条结果。`;
       results.innerHTML = payload.results.map((item) => `
         <li>
           <strong>${escapeHtml(item.title)}</strong>
@@ -1236,7 +1603,7 @@ def semantic_search_page() -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>On-Call 璇箟鎼滅储</title>
+  <title>On-Call 语义搜索</title>
   <style>
     :root {
       color-scheme: light;
@@ -1305,13 +1672,13 @@ def semantic_search_page() -> str:
 </head>
 <body>
   <main>
-    <h1>On-Call SOP 璇箟鎼滅储</h1>
-    <p>鏀寔涓嶇簿纭尮閰嶇殑鐩镐技闂妫€绱紝渚嬪鈥滄湇鍔″櫒鎸備簡鈥濇垨鈥滈粦瀹㈡敾鍑烩€濄€?/p>
+    <h1>On-Call SOP 语义搜索</h1>
+    <p>支持不要求原词精确出现的相关问题检索，例如“服务器挂了”“黑客攻击”“机器学习模型出问题”。</p>
     <form id="search-form">
-      <input id="query" name="q" type="text" placeholder="杈撳叆璇箟鏌ヨ锛屼緥濡?鏈嶅姟鍣ㄦ寕浜?/ 榛戝鏀诲嚮 / 鏈哄櫒瀛︿範妯″瀷鍑洪棶棰? autocomplete="off">
-      <button type="submit">鎼滅储</button>
+      <input id="query" name="q" type="text" placeholder="输入语义查询，例如：服务器挂了 / 黑客攻击 / 机器学习模型出问题" autocomplete="off">
+      <button type="submit">搜索</button>
     </form>
-    <div id="status" class="empty">璇疯緭鍏ヤ竴涓棶棰樻垨鎻忚堪寮€濮嬫悳绱€?/div>
+    <div id="status" class="empty">请输入一个问题或描述开始搜索。</div>
     <ul id="results"></ul>
   </main>
   <script>
@@ -1334,26 +1701,26 @@ def semantic_search_page() -> str:
       results.innerHTML = "";
 
       if (!query) {
-        status.textContent = "璇疯緭鍏ヤ竴涓棶棰樻垨鎻忚堪寮€濮嬫悳绱€?;
+        status.textContent = "请输入一个问题或描述开始搜索。";
         return;
       }
 
-      status.textContent = "鎼滅储涓?..";
+      status.textContent = "搜索中...";
 
       const response = await fetch(`/v2/search?q=${encodeURIComponent(query)}`);
       const payload = await response.json();
 
       if (!response.ok) {
-        status.textContent = payload.detail || "璇箟鎼滅储鏆傛椂涓嶅彲鐢ㄣ€?;
+        status.textContent = payload.detail || "语义搜索暂时不可用。";
         return;
       }
 
       if (!payload.results.length) {
-        status.textContent = `娌℃湁鎵惧埌涓?"${query}" 璇箟鐩稿叧鐨勬枃妗ｃ€俙;
+        status.textContent = `没有找到与 "${query}" 语义相关的文档。`;
         return;
       }
 
-      status.textContent = `鎵惧埌 ${payload.results.length} 鏉＄粨鏋溿€俙;
+      status.textContent = `找到 ${payload.results.length} 条结果。`;
       results.innerHTML = payload.results.map((item) => `
         <li>
           <strong>${escapeHtml(item.title)}</strong>
@@ -1446,12 +1813,6 @@ def chat_page() -> str:
     .message.assistant.streaming {
       box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.18);
     }
-    .message.tool {
-      border-color: #dbe4f0;
-      background: #f8fafc;
-      color: #475569;
-      font-size: 14px;
-    }
     .label {
       margin-bottom: 6px;
       font-size: 12px;
@@ -1513,6 +1874,22 @@ def chat_page() -> str:
     }
     .content a {
       color: #2563eb;
+    }
+    .tool-trace {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.05);
+      color: #475569;
+      font-size: 13px;
+    }
+    .tool-trace:empty {
+      display: none;
+    }
+    .tool-event {
+      line-height: 1.5;
     }
     .composer {
       display: grid;
@@ -1750,6 +2127,36 @@ def chat_page() -> str:
       return { item, body };
     }
 
+    function addAssistantMessage() {
+      removeEmptyState();
+      const item = document.createElement("div");
+      item.className = "message assistant";
+
+      const label = document.createElement("div");
+      label.className = "label";
+      label.textContent = "助手";
+
+      const trace = document.createElement("div");
+      trace.className = "tool-trace";
+
+      const body = document.createElement("div");
+      body.className = "content";
+      body.innerHTML = renderMarkdown("正在思考...");
+
+      item.append(label, trace, body);
+      historyEl.appendChild(item);
+      historyEl.scrollTop = historyEl.scrollHeight;
+      return { item, body, trace };
+    }
+
+    function addToolEvent(assistantMessage, content) {
+      const event = document.createElement("div");
+      event.className = "tool-event";
+      event.textContent = content;
+      assistantMessage.trace.appendChild(event);
+      historyEl.scrollTop = historyEl.scrollHeight;
+    }
+
     async function consumeEventStream(response, onEvent) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -1791,7 +2198,7 @@ def chat_page() -> str:
       messageInput.value = "";
       sendButton.disabled = true;
 
-      const assistantMessage = addMessage("assistant", "正在思考...", true);
+      const assistantMessage = addAssistantMessage();
       assistantMessage.item.classList.add("streaming");
 
       let reply = "";
@@ -1833,7 +2240,7 @@ def chat_page() -> str:
           }
 
           if (eventPayload.type === "tool_call" || eventPayload.type === "status") {
-            addMessage("tool", eventPayload.message || "", false, assistantMessage.item);
+            addToolEvent(assistantMessage, eventPayload.message || "");
             return;
           }
 
