@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>On-Call 关键词搜索</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, sans-serif;
+    }
+    body {
+      margin: 0;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1 {
+      margin: 0 0 20px;
+      font-size: 28px;
+    }
+    form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    input, button {
+      height: 44px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 16px;
+      padding: 0 14px;
+    }
+    button {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: white;
+      cursor: pointer;
+    }
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 12px;
+    }
+    li {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .meta {
+      color: #64748b;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .empty {
+      color: #64748b;
+      padding: 12px 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>On-Call SOP 关键词搜索</h1>
+    <form id="search-form">
+      <input id="query" name="q" type="text" placeholder="输入关键词，例如 OOM / 故障 / CDN / &" autocomplete="off">
+      <button type="submit">搜索</button>
+    </form>
+    <div id="status" class="empty">请输入关键词开始搜索。</div>
+    <ul id="results"></ul>
+  </main>
+  <script>
+    const form = document.getElementById("search-form");
+    const input = document.getElementById("query");
+    const results = document.getElementById("results");
+    const status = document.getElementById("status");
+
+    function escapeHtml(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const query = input.value.trim();
+      results.innerHTML = "";
+
+      if (!query) {
+        status.textContent = "请输入关键词开始搜索。";
+        return;
+      }
+
+      status.textContent = "搜索中...";
+      const response = await fetch(`/v1/search?q=${encodeURIComponent(query)}`);
+      const payload = await response.json();
+
+      if (!payload.results.length) {
+        status.textContent = `没有找到与 "${query}" 相关的文档。`;
+        return;
+      }
+
+      status.textContent = `找到 ${payload.results.length} 条结果。`;
+      results.innerHTML = payload.results.map((item) => `
+        <li>
+          <strong>${escapeHtml(item.title)}</strong>
+          <div class="meta">ID: ${escapeHtml(item.id)} | Score: ${item.score}</div>
+          <p>${escapeHtml(item.snippet)}</p>
+        </li>
+      `).join("");
+    });
+  </script>
+</body>
+</html>

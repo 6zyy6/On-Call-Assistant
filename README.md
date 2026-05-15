@@ -53,7 +53,15 @@
 ```text
 .
 ├── data/              # SOP HTML 文档
-├── main.py            # FastAPI 应用、检索逻辑、语义搜索、Agent、前端页面
+├── templates/         # v1/v2/v3 前端页面模板
+├── oncall/
+│   ├── app.py         # FastAPI 应用、路由、依赖组装
+│   ├── agent.py       # On-Call Agent、readFile 工具、流式响应
+│   ├── search.py      # 关键词检索与文档索引
+│   ├── semantic.py    # 语义检索与本地 fallback
+│   ├── text.py        # HTML 可见文本抽取、分词、chunk 处理
+│   └── schemas.py     # API 请求体与工具参数模型
+├── app.py             # 应用启动入口
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -93,7 +101,7 @@ DASHSCOPE_CHAT_MODEL=qwen3.6-plus
 直接运行：
 
 ```bash
-python main.py
+python app.py
 ```
 
 启动后可访问：

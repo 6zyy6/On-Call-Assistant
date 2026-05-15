@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>On-Call 语义搜索</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, sans-serif;
+    }
+    body {
+      margin: 0;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+    }
+    p {
+      margin: 0 0 20px;
+      color: #64748b;
+    }
+    form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    input, button {
+      height: 44px;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      font-size: 16px;
+      padding: 0 14px;
+    }
+    button {
+      background: #0f766e;
+      border-color: #0f766e;
+      color: white;
+      cursor: pointer;
+    }
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 12px;
+    }
+    li {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .meta {
+      color: #64748b;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .empty {
+      color: #64748b;
+      padding: 12px 0;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>On-Call SOP 语义搜索</h1>
+    <p>支持不要求原词精确出现的相关问题检索，例如“服务器挂了”“黑客攻击”“机器学习模型出问题”。</p>
+    <form id="search-form">
+      <input id="query" name="q" type="text" placeholder="输入语义查询，例如：服务器挂了 / 黑客攻击 / 机器学习模型出问题" autocomplete="off">
+      <button type="submit">搜索</button>
+    </form>
+    <div id="status" class="empty">请输入一个问题或描述开始搜索。</div>
+    <ul id="results"></ul>
+  </main>
+  <script>
+    const form = document.getElementById("search-form");
+    const input = document.getElementById("query");
+    const results = document.getElementById("results");
+    const status = document.getElementById("status");
+
+    function escapeHtml(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const query = input.value.trim();
+      results.innerHTML = "";
+
+      if (!query) {
+        status.textContent = "请输入一个问题或描述开始搜索。";
+        return;
+      }
+
+      status.textContent = "搜索中...";
+
+      const response = await fetch(`/v2/search?q=${encodeURIComponent(query)}`);
+      const payload = await response.json();
+
+      if (!response.ok) {
+        status.textContent = payload.detail || "语义搜索暂时不可用。";
+        return;
+      }
+
+      if (!payload.results.length) {
+        status.textContent = `没有找到与 "${query}" 语义相关的文档。`;
+        return;
+      }
+
+      status.textContent = `找到 ${payload.results.length} 条结果。`;
+      results.innerHTML = payload.results.map((item) => `
+        <li>
+          <strong>${escapeHtml(item.title)}</strong>
+          <div class="meta">ID: ${escapeHtml(item.id)} | Score: ${item.score}</div>
+          <p>${escapeHtml(item.snippet)}</p>
+        </li>
+      `).join("");
+    });
+  </script>
+</body>
+</html>
